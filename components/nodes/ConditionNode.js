@@ -16,13 +16,13 @@ export default function ConditionNode({ data }) {
         boxShadow: "0 0 12px rgba(0,0,0,0.5)",
       }}
     >
-      <div style={{ fontSize: 20 }}>🔀 Condition</div>
+      <div style={{ fontSize: 24 }}>🔀 Condition</div>
 
-      <div style={{ marginTop: 6, fontSize: 15 }}>
+      <div style={{ marginTop: 6, fontSize: 18 }}>
         {data.label || "Condition"}
       </div>
 
-      <div style={{ marginTop: 2, fontSize: 13, opacity: 0.85 }}>
+      <div style={{ marginTop: 2, fontSize: 16, opacity: 0.85 }}>
         {summary}
       </div>
 

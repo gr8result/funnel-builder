@@ -85,8 +85,8 @@ async function sendWithRetry(sendUrl, payload, maxAttempts = 3) {
           s(parsed.text) ||
           `Send failed (HTTP ${resp.status})`;
       } else {
-        const provider_message_id =
-          data?.provider_message_id || data?.message_id || data?.id || null;
+      const provider_message_id =
+        data?.provider_message_id || data?.provider_id || data?.message_id || data?.id || null;
         return { ok: true, provider_message_id };
       }
     } catch (e) {

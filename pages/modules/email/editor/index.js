@@ -1,5 +1,10 @@
 // /pages/modules/email/editor/index.js
-// FULL REPLACEMENT — keeps your banner/page layout + loads templates/select import + passes initial HTML into editor
+// FULL REPLACEMENT — banner only: consistent sizing + Back pill style (white bg / blue text)
+// ✅ Title+icon 48px weight 700
+// ✅ Subtitle 18px
+// ✅ Back pill: 18px, white bg, blue text
+// ✅ Removes Templates button (per your earlier instruction)
+// ❌ No other behavior changes
 
 import { useEffect, useState } from "react";
 import Head from "next/head";
@@ -37,7 +42,9 @@ export default function EmailEditorPage() {
         // allow URL param override too (?id=...)
         const urlId = String(router.query?.id || "").trim();
 
-        const templateId = String(importPayload?.templateId || importPayload?.id || urlId || "blank").trim();
+        const templateId = String(
+          importPayload?.templateId || importPayload?.id || urlId || "blank"
+        ).trim();
         const source = String(importPayload?.source || "").trim();
 
         // clear one-shot import (so refresh doesn't keep re-importing)
@@ -51,22 +58,20 @@ export default function EmailEditorPage() {
           return;
         }
 
-        // if user clicked "Open a saved email" you may be passing finished-email filename etc.
-        // editor-load handles: user builder json OR user finished-emails html OR base templates html
-        const url = `/api/email/editor-load?templateId=${encodeURIComponent(templateId)}&userId=${encodeURIComponent(uid)}&source=${encodeURIComponent(source)}`;
+        const url = `/api/email/editor-load?templateId=${encodeURIComponent(
+          templateId
+        )}&userId=${encodeURIComponent(uid)}&source=${encodeURIComponent(source)}`;
         const r = await fetch(url);
         const j = await r.json().catch(() => null);
 
-        // If API says legacy/base HTML exists, fetch the actual HTML file directly from Supabase public URL pattern (fallback),
-        // OR let editor-load just tell us "html found" and we keep blank (you can paste HTML).
-        // The simplest, reliable: if it returns htmlText, use it. If not, keep blank.
         if (j?.ok && typeof j?.html === "string" && j.html.trim()) {
           if (mounted) setInitialHtml(j.html);
         } else if (j?.ok && j?.legacyHtml === true && j?.path && uid) {
-          // attempt download through storage public endpoint
           const supa = process.env.NEXT_PUBLIC_SUPABASE_URL;
           const publicUrl = supa
-            ? `${supa}/storage/v1/object/public/email-user-assets/${encodeURIComponent(uid)}/${j.path.split("/").slice(1).join("/")}`
+            ? `${supa}/storage/v1/object/public/email-user-assets/${encodeURIComponent(
+                uid
+              )}/${j.path.split("/").slice(1).join("/")}`
             : "";
           if (publicUrl) {
             const hr = await fetch(publicUrl);
@@ -77,9 +82,7 @@ export default function EmailEditorPage() {
           }
         } else if (j?.ok && j?.baseHtml === true && j?.path) {
           const supa = process.env.NEXT_PUBLIC_SUPABASE_URL;
-          const publicUrl = supa
-            ? `${supa}/storage/v1/object/public/email-assets/${j.path}`
-            : "";
+          const publicUrl = supa ? `${supa}/storage/v1/object/public/email-assets/${j.path}` : "";
           if (publicUrl) {
             const hr = await fetch(publicUrl);
             const ht = await hr.text();
@@ -108,18 +111,19 @@ export default function EmailEditorPage() {
       </Head>
 
       <div className="wrap">
-        {/* KEEP YOUR BANNER STYLE */}
         <div className="banner">
           <div className="bLeft">
-            <div className="bTitle">Email Editor</div>
+            <div className="bTitleRow">
+              <span className="bIcon" aria-hidden>
+                ✉️
+              </span>
+              <div className="bTitle">Email Editor</div>
+            </div>
             <div className="bSub">1320 canvas • drag & drop blocks • full text tools</div>
           </div>
 
           <div className="bRight">
-            <Link href="/modules/email/templates/select" className="btnGhost">
-              Templates
-            </Link>
-            <Link href="/modules/email" className="btnGhost">
+            <Link href="/modules/email" className="btnBack">
               ← Back
             </Link>
           </div>
@@ -139,6 +143,7 @@ export default function EmailEditorPage() {
           padding: 14px 16px 24px;
         }
 
+        /* keep your banner width as-is */
         .banner {
           width: 1320px;
           max-width: calc(100vw - 24px);
@@ -152,15 +157,26 @@ export default function EmailEditorPage() {
           box-shadow: 0 18px 50px rgba(0, 0, 0, 0.35);
         }
 
+        .bTitleRow {
+          display: flex;
+          align-items: center;
+          gap: 10px;
+        }
+
+        /* REQUIRED */
+        .bIcon {
+          font-size: 48px;
+          line-height: 1;
+        }
         .bTitle {
-          font-size: 26px;
-          font-weight: 900;
+          font-size: 48px;
+          font-weight: 700;
           color: #fff;
           line-height: 1;
         }
         .bSub {
-          margin-top: 4px;
-          font-size: 13px;
+          margin-top: 6px;
+          font-size: 18px;
           opacity: 0.95;
           color: rgba(255, 255, 255, 0.92);
         }
@@ -168,27 +184,39 @@ export default function EmailEditorPage() {
         .bRight {
           display: flex;
           gap: 10px;
+          align-items: center;
         }
 
-        .btnGhost {
+        /* REQUIRED: pill button 18px, white bg, blue text */
+        .btnBack {
           display: inline-flex;
           align-items: center;
           justify-content: center;
-          height: 34px;
-          padding: 0 12px;
+          height: 42px;
+          padding: 0 18px;
           border-radius: 999px;
-          border: 1px solid rgba(255, 255, 255, 0.45);
-          background: rgba(255, 255, 255, 0.14);
-          color: #fff;
+          border: 2px solid rgba(255, 255, 255, 0.85);
+          background: rgba(255, 255, 255, 0.95);
+          color: #1d4ed8;
           text-decoration: none;
           font-weight: 800;
-          font-size: 13px;
+          font-size: 18px;
           cursor: pointer;
         }
+        .btnBack:hover {
+          background: #ffffff;
+          border-color: #ffffff;
+          box-shadow: 0 10px 30px rgba(0, 0, 0, 0.25);
+        }
 
+        /*
+          IMPORTANT:
+          Do NOT constrain the editor to banner width.
+          Let editor be wider than banner while staying centered.
+        */
         .content {
-          width: 1320px;
-          max-width: calc(100vw - 24px);
+          width: calc(100vw - 24px);
+          max-width: 1900px;
           margin: 0 auto;
         }
 

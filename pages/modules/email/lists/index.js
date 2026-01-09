@@ -1,11 +1,15 @@
 // /pages/modules/email/lists/index.js
 // GR8 RESULT — BULK DELETE + BIG CHECKBOXES + NAME SORTING + SHARED AVATARS
+// ✅ Restores click-to-open Lead Details modal (row click)
+// ✅ Prevents row-click when using checkbox / edit / delete buttons
+// ✅ Loads stages from crm_pipelines (first pipeline) for LeadDetailsModal
 
 import { useState, useEffect, useMemo } from "react";
 import Head from "next/head";
 import { supabase } from "../../../../utils/supabase-client";
 import EditListModal from "/components/lists/EditListModal";
 import SubscriberAvatar from "/components/crm/SubscriberAvatar";
+import LeadDetailsModal from "/components/crm/LeadDetailsModal";
 import { getAvatarForLead } from "../../../../utils/avatar";
 
 export default function EmailListsDashboard() {
@@ -39,12 +43,21 @@ export default function EmailListsDashboard() {
   const [importListId, setImportListId] = useState("");
   const [importFile, setImportFile] = useState(null);
 
+  // ✅ Lead Details modal state
+  const [isLeadModalOpen, setIsLeadModalOpen] = useState(false);
+  const [selectedLead, setSelectedLead] = useState(null);
+  const [stages, setStages] = useState([]);
+
   useEffect(() => {
     loadUser();
   }, []);
 
   useEffect(() => {
-    if (userId) loadLists();
+    if (userId) {
+      loadLists();
+      loadStages();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userId]);
 
   async function loadUser() {
@@ -53,6 +66,41 @@ export default function EmailListsDashboard() {
     } = await supabase.auth.getUser();
 
     if (user) setUserId(user.id);
+  }
+
+  async function loadStages() {
+    try {
+      const { data, error } = await supabase
+        .from("crm_pipelines")
+        .select("stages")
+        .eq("user_id", userId)
+        .order("created_at", { ascending: true })
+        .limit(1);
+
+      if (error) {
+        console.error("loadStages error:", error);
+        setStages([]);
+        return;
+      }
+
+      const first = data?.[0];
+      const s = first?.stages;
+
+      if (Array.isArray(s)) setStages(s);
+      else if (typeof s === "string") {
+        try {
+          const parsed = JSON.parse(s);
+          setStages(Array.isArray(parsed) ? parsed : []);
+        } catch {
+          setStages([]);
+        }
+      } else {
+        setStages([]);
+      }
+    } catch (e) {
+      console.error("loadStages exception:", e);
+      setStages([]);
+    }
   }
 
   async function loadLists() {
@@ -131,6 +179,12 @@ export default function EmailListsDashboard() {
       default:
         return "#374151";
     }
+  }
+
+  // ✅ Open Lead Details modal
+  function openLeadDetails(lead) {
+    setSelectedLead(lead);
+    setIsLeadModalOpen(true);
   }
 
   // EXPORT CSV
@@ -702,9 +756,7 @@ export default function EmailListsDashboard() {
                       <th></th>
                       <th
                         onClick={() =>
-                          setNameSort((prev) =>
-                            prev === "asc" ? "desc" : "asc"
-                          )
+                          setNameSort((prev) => (prev === "asc" ? "desc" : "asc"))
                         }
                         style={{ cursor: "pointer", userSelect: "none" }}
                       >
@@ -722,11 +774,24 @@ export default function EmailListsDashboard() {
                   <tbody>
                     {sortedSubscribers.map((s) => {
                       return (
-                        <tr key={s.id}>
+                        <tr
+                          key={s.id}
+                          onClick={() => openLeadDetails(s)}
+                          style={{
+                            cursor: "pointer",
+                          }}
+                          onMouseEnter={(e) => {
+                            e.currentTarget.style.background = "rgba(255,255,255,0.03)";
+                          }}
+                          onMouseLeave={(e) => {
+                            e.currentTarget.style.background = "transparent";
+                          }}
+                        >
                           <td>
                             <input
                               type="checkbox"
                               checked={selectedIds.includes(s.id)}
+                              onClick={(e) => e.stopPropagation()}
                               onChange={() =>
                                 setSelectedIds((prev) =>
                                   prev.includes(s.id)
@@ -751,11 +816,7 @@ export default function EmailListsDashboard() {
                               }}
                             >
                               {/* Shared avatar component */}
-                              <SubscriberAvatar
-                                lead={s}
-                                size={32}
-                                fontSize={24}
-                              />
+                              <SubscriberAvatar lead={s} size={32} fontSize={24} />
                               <span>{s.name || "-"}</span>
                             </div>
                           </td>
@@ -777,7 +838,10 @@ export default function EmailListsDashboard() {
                                 marginBottom: "16px",
                                 cursor: "pointer",
                               }}
-                              onClick={() => openEditSubscriber(s)}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                openEditSubscriber(s);
+                              }}
                             >
                               ✏️
                             </button>
@@ -792,7 +856,10 @@ export default function EmailListsDashboard() {
                                 height: "48px",
                                 cursor: "pointer",
                               }}
-                              onClick={() => deleteSubscriber(s.id)}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                deleteSubscriber(s.id);
+                              }}
                             >
                               🗑️
                             </button>
@@ -806,6 +873,25 @@ export default function EmailListsDashboard() {
             </section>
           </div>
         </div>
+
+        {/* ✅ LEAD DETAILS MODAL */}
+        <LeadDetailsModal
+          isOpen={isLeadModalOpen}
+          lead={selectedLead}
+          stages={stages}
+          userId={userId}
+          fontScale={1.35}
+          onClose={() => {
+            setIsLeadModalOpen(false);
+            setSelectedLead(null);
+          }}
+          onNotesUpdated={(leadId, notes) => {
+            // keep this page in sync if notes changed
+            setSubscribers((prev) =>
+              (prev || []).map((x) => (x.id === leadId ? { ...x, notes } : x))
+            );
+          }}
+        />
 
         {/* EDIT SUBSCRIBER MODAL */}
         {editingSubscriber && (
@@ -832,52 +918,48 @@ export default function EmailListsDashboard() {
               }}
             >
               <h3>
-                {editingSubscriber === "edit"
-                  ? "Edit Subscriber"
-                  : "Add Subscriber"}
+                {editingSubscriber === "edit" ? "Edit Subscriber" : "Add Subscriber"}
               </h3>
 
               {/* INPUTS */}
-              {["name", "email", "phone", "source", "tags", "notes"].map(
-                (f) => (
-                  <div
-                    key={f}
+              {["name", "email", "phone", "source", "tags", "notes"].map((f) => (
+                <div
+                  key={f}
+                  style={{
+                    marginBottom: "10px",
+                    display: "flex",
+                    flexDirection: "column",
+                  }}
+                >
+                  <label
                     style={{
-                      marginBottom: "10px",
-                      display: "flex",
-                      flexDirection: "column",
+                      marginBottom: "16px",
+                      fontSize: "16px",
+                      color: "#cbd5e1",
                     }}
                   >
-                    <label
-                      style={{
-                        marginBottom: "16px",
-                        fontSize: "16px",
-                        color: "#cbd5e1",
-                      }}
-                    >
-                      {f.charAt(0).toUpperCase() + f.slice(1)}
-                    </label>
+                    {f.charAt(0).toUpperCase() + f.slice(1)}
+                  </label>
 
-                    <input
-                      type="text"
-                      value={form[f] || ""}
-                      onChange={(e) =>
-                        setForm((prev) => ({
-                          ...prev,
-                          [f]: e.target.value,
-                        }))
-                      }
-                      style={{
-                        padding: "16px",
-                        borderRadius: "6px",
-                        border: "1px solid #1f2a37",
-                        background: "#0f1724",
-                        color: "#fff",
-                      }}
-                    />
-                  </div>
-                )
-              )}
+                  <input
+                    type="text"
+                    value={form[f] || ""}
+                    onChange={(e) =>
+                      setForm((prev) => ({
+                        ...prev,
+                        [f]: e.target.value,
+                      }))
+                    }
+                    style={{
+                      padding: "16px",
+                      borderRadius: "6px",
+                      border: "1px solid #1f2a37",
+                      background: "#0f1724",
+                      color: "#fff",
+                    }}
+                  />
+                </div>
+              ))}
 
               {/* LIST DROPDOWN */}
               <div

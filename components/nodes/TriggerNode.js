@@ -15,7 +15,7 @@ export default function TriggerNode({ data }) {
         overflow: "hidden",
         border: "1px solid rgba(255,255,255,0.12)",
         boxShadow: "0 14px 34px rgba(0,0,0,0.35)",
-        background: "rgba(2,6,23,0.35)",
+        background: "rgba(56, 164, 172, 0.99)",
       }}
     >
       <div
@@ -29,8 +29,8 @@ export default function TriggerNode({ data }) {
         }}
       >
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <span style={{ fontSize: 18 }}>⚡</span>
-          <div style={{ fontWeight: 900, fontSize: 18, color: "#071018" }}>
+          <span style={{ fontSize: 24 }}>⚡</span>
+          <div style={{ fontWeight: 700, fontSize: 24, color: "#071018" }}>
             {label}
           </div>
         </div>
@@ -42,8 +42,8 @@ export default function TriggerNode({ data }) {
             color: "#e5e7eb",
             padding: "6px 10px",
             borderRadius: 999,
-            fontWeight: 900,
-            fontSize: 14,
+            fontWeight: 700,
+            fontSize: 16,
             minWidth: 92,
             textAlign: "center",
           }}
@@ -57,7 +57,7 @@ export default function TriggerNode({ data }) {
           padding: "10px 14px",
           background: "rgba(2,6,23,0.55)",
           color: "#e5e7eb",
-          fontWeight: 800,
+          fontWeight: 600,
           fontSize: 14,
         }}
       >

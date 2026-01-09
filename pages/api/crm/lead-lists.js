@@ -1,8 +1,10 @@
-// /pages/api/crm/leads.js
-// FULL REPLACEMENT — uses phone (NOT mobile) + still tolerates mobile if it exists
-// ✅ Returns ALL leads for the logged-in user from public.leads
-// ✅ Derives user from Bearer token (multi-tenant safe)
+// /pages/api/crm/lead-lists.js
+// FULL REPLACEMENT — FIXES "Server error" banner by making /api/crm/lead-lists work
+//
+// ✅ Returns ALL lead lists for the logged-in user (multi-tenant safe)
+// ✅ Derives user from Bearer token (no query params)
 // ✅ Uses service role + auth.getUser(token)
+// ✅ Matches your UI expectation: { ok: true, lists: [...] }
 
 import { createClient } from "@supabase/supabase-js";
 
@@ -50,32 +52,20 @@ export default async function handler(req, res) {
     if (userErr || !userData?.user?.id) {
       return res.status(401).json({ ok: false, error: "Invalid session token" });
     }
+
     const uid = userData.user.id;
 
-    const limit = Math.min(Math.max(Number(req.query?.limit || 5000), 1), 50000);
-
-    // Your schema has phone (NOT mobile). We still select mobile if it exists in some environments.
-    // If mobile does NOT exist, Supabase will error — so we try phone-only first.
-    let data = null;
-
-    const first = await sb
-      .from("leads")
-      .select("id,name,email,phone,created_at,stage,pipeline_id,list_id,user_id")
+    const { data, error } = await sb
+      .from("lead_lists")
+      .select("*")
       .eq("user_id", uid)
-      .order("created_at", { ascending: false })
-      .limit(limit);
+      .order("created_at", { ascending: true });
 
-    if (first.error) {
-      return res.status(500).json({ ok: false, error: first.error.message || String(first.error) });
+    if (error) {
+      return res.status(500).json({ ok: false, error: error.message || String(error) });
     }
 
-    data = first.data || [];
-
-    return res.status(200).json({
-      ok: true,
-      count: Array.isArray(data) ? data.length : 0,
-      leads: data,
-    });
+    return res.status(200).json({ ok: true, lists: data || [] });
   } catch (e) {
     return res.status(500).json({
       ok: false,

@@ -1,89 +1,100 @@
 // /pages/api/telephony/make-call.js
-// FULL REPLACEMENT
-// POST { to, lead_id?, record? }
-// ✅ Calls YOU first then bridges to target
-// ✅ Recording enabled
-// ✅ Status/recording callbacks log into BOTH lead_notes + leads.notes via /api/twilio/status-callback
-
 import twilio from "twilio";
 
-function normalizePhone(raw) {
-  let v = String(raw || "").trim();
-  if (!v) return "";
-  v = v.replace(/[^\d+]/g, "");
-  if (!v.startsWith("+") && v.startsWith("61")) v = "+" + v;
-  if (!v.startsWith("+") && v.startsWith("0") && v.length >= 9) v = "+61" + v.slice(1);
+function pickEnv(...keys) {
+  for (const k of keys) {
+    const v = process.env[k];
+    if (v && String(v).trim()) return String(v).trim();
+  }
+  return "";
+}
+
+function must(v, name) {
+  if (!v) throw new Error(`Missing ${name}`);
   return v;
 }
 
-function getBaseUrl(req) {
-  const explicit = process.env.PUBLIC_BASE_URL;
-  if (explicit) return explicit.replace(/\/+$/, "");
-
-  const proto =
-    (req.headers["x-forwarded-proto"] || "").toString().split(",")[0].trim() ||
-    (req.connection && req.connection.encrypted ? "https" : "http");
-
-  const host = (req.headers["x-forwarded-host"] || req.headers.host || "").toString().split(",")[0].trim();
-  return `${proto}://${host}`;
-}
-
+// Makes calls work EVEN IF TWILIO_AGENT_PHONE IS NOT SET
+// - If agent phone exists → bridge call (agent first, then customer)
+// - If NOT → direct outbound call to customer
 export default async function handler(req, res) {
-  if (req.method !== "POST") return res.status(405).json({ ok: false, error: "POST only" });
+  if (req.method !== "POST") {
+    return res.status(405).json({ ok: false, error: "POST only" });
+  }
 
   try {
-    const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID;
-    const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN;
-    const TWILIO_AGENT_PHONE = process.env.TWILIO_AGENT_PHONE;
+    const accountSid = pickEnv("TWILIO_ACCOUNT_SID");
+    const authToken = pickEnv("TWILIO_AUTH_TOKEN");
+    const fromNumber = pickEnv(
+      "TWILIO_FROM_NUMBER",
+      "TWILIO_CALLER_ID",
+      "TWILIO_PHONE_NUMBER"
+    );
 
-    if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN) {
-      return res.status(500).json({
-        ok: false,
-        error: "Missing Twilio env vars. Need TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN.",
+    const agentPhone = pickEnv(
+      "TWILIO_AGENT_PHONE",
+      "TWILIO_AGENT_NUMBER",
+      "TWILIO_MY_PHONE"
+    );
+
+    const { to, record } = req.body || {};
+    const toNumber = String(to || "").trim();
+
+    must(accountSid, "TWILIO_ACCOUNT_SID");
+    must(authToken, "TWILIO_AUTH_TOKEN");
+    must(fromNumber, "TWILIO_FROM_NUMBER");
+    if (!toNumber) return res.status(400).json({ ok: false, error: "Missing 'to' number" });
+
+    const client = twilio(accountSid, authToken);
+
+    // ===============================
+    // CASE 1: AGENT PHONE EXISTS
+    // ===============================
+    if (agentPhone) {
+      const vr = new twilio.twiml.VoiceResponse();
+
+      const dial = vr.dial({
+        callerId: fromNumber,
+        record: record ? "record-from-answer-dual" : undefined,
+        recordingStatusCallbackEvent: record ? "completed" : undefined,
+      });
+
+      dial.number({}, toNumber);
+
+      const call = await client.calls.create({
+        to: agentPhone,
+        from: fromNumber,
+        twiml: vr.toString(),
+      });
+
+      return res.status(200).json({
+        ok: true,
+        mode: "agent-bridge",
+        sid: call.sid,
+        status: call.status,
       });
     }
-    if (!TWILIO_AGENT_PHONE || !String(TWILIO_AGENT_PHONE).startsWith("+")) {
-      return res.status(500).json({
-        ok: false,
-        error: "Missing/invalid TWILIO_AGENT_PHONE (+countrycode...).",
-      });
-    }
 
-    const { to, lead_id = null, record = true } = req.body || {};
-    const toNum = normalizePhone(to);
-
-    if (!toNum) return res.status(400).json({ ok: false, error: "to required" });
-    if (!toNum.startsWith("+")) return res.status(400).json({ ok: false, error: "Phone must include +countrycode" });
-
-    const client = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
-
-    const baseUrl = getBaseUrl(req);
-    const statusCallback = `${baseUrl}/api/twilio/status-callback?lead_id=${encodeURIComponent(
-      lead_id || ""
-    )}&to=${encodeURIComponent(toNum)}`;
-
-    const twiml = new twilio.twiml.VoiceResponse();
-    const dial = twiml.dial({
-      callerId: TWILIO_AGENT_PHONE,
-      record: record ? "record-from-answer" : undefined,
-      recordingStatusCallback: `${baseUrl}/api/twilio/status-callback?lead_id=${encodeURIComponent(
-        lead_id || ""
-      )}&to=${encodeURIComponent(toNum)}&event=recording`,
-      recordingStatusCallbackEvent: ["completed"],
-    });
-    dial.number(toNum);
-
+    // ===============================
+    // CASE 2: NO AGENT PHONE → DIRECT CALL
+    // ===============================
     const call = await client.calls.create({
-      twiml: twiml.toString(),
-      to: TWILIO_AGENT_PHONE,
-      from: TWILIO_AGENT_PHONE,
-      statusCallback,
-      statusCallbackMethod: "POST",
-      statusCallbackEvent: ["initiated", "ringing", "answered", "completed"],
+      to: toNumber,
+      from: fromNumber,
+      record: !!record,
+      recordingChannels: record ? "dual" : undefined,
     });
 
-    return res.status(200).json({ ok: true, callSid: call.sid, to: toNum, lead_id: lead_id || null });
+    return res.status(200).json({
+      ok: true,
+      mode: "direct",
+      sid: call.sid,
+      status: call.status,
+    });
   } catch (e) {
-    return res.status(500).json({ ok: false, error: e?.message || "Server error" });
+    return res.status(500).json({
+      ok: false,
+      error: e?.message || "Call failed",
+    });
   }
 }

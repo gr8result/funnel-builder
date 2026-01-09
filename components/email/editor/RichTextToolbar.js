@@ -1,14 +1,12 @@
 // /components/email/editor/RichTextToolbar.js
-// FULL REPLACEMENT — NO “Apply” buttons.
-// ✅ Font dropdown with hover-preview, click commits
-// ✅ Size dropdown with hover-preview, click commits
-// ✅ Colour dropdown with hover-preview, click commits (+ custom hex)
-// ✅ Clean toolbar (no random “List” text)
-// NOTE: preview is safe: it snapshots canvas HTML + restores on hover-out (only while dropdown is open)
+// FULL REPLACEMENT — instant font/size/colour (no Apply). Uses last selection from EditorLayout.
+// ✅ Dropdowns (as you asked) for colours + sizes + fonts
+// ✅ Clicking a choice immediately applies
+// ✅ Works with contentEditable reliably (wraps selection in a styled span)
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
-const SAFE_FONTS = [
+const FONTS = [
   "Arial",
   "Verdana",
   "Tahoma",
@@ -31,22 +29,17 @@ const SAFE_FONTS = [
   "Rubik",
 ];
 
-const SIZE_OPTIONS = [12, 14, 16, 18, 20, 24, 28, 32, 36, 42, 48, 56, 64, 72];
+const SIZES = [12, 14, 16, 18, 20, 24, 28, 32, 36, 42, 48, 56, 64, 72];
 
 export default function RichTextToolbar({ editorRef, restoreSelection, rememberSelection, setStatus, palette }) {
-  const [fontOpen, setFontOpen] = useState(false);
-  const [sizeOpen, setSizeOpen] = useState(false);
-  const [colorOpen, setColorOpen] = useState(false);
-
-  const [customHex, setCustomHex] = useState("#111827");
-
-  // snapshot for hover-preview
-  const snapRef = useRef(null);
+  const [font, setFont] = useState("Arial");
+  const [size, setSize] = useState(16);
+  const [color, setColor] = useState("#111827");
+  const [custom, setCustom] = useState("#111827");
 
   const colors = useMemo(() => {
     const base = Array.isArray(palette) && palette.length ? palette : ["#111827", "#000000", "#ffffff", "#ef4444", "#f97316", "#facc15", "#22c55e", "#3b82f6", "#a855f7", "#ec4899", "#9ca3af"];
-    // ensure unique
-    return Array.from(new Set(base.map((c) => String(c))));
+    return Array.from(new Set(base.map(String)));
   }, [palette]);
 
   function focusCanvas() {
@@ -54,21 +47,24 @@ export default function RichTextToolbar({ editorRef, restoreSelection, rememberS
     if (el) el.focus();
   }
 
-  function cmd(name, value = null) {
+  function exec(cmd) {
     focusCanvas();
     restoreSelection();
     try {
-      document.execCommand(name, false, value);
+      document.execCommand(cmd, false, null);
       rememberSelection();
     } catch {}
   }
 
-  // ---- Style wrapper (px size, font, color) ----
-  function wrapSelectionStyle(styleObj) {
+  function wrapStyle(styleObj) {
+    focusCanvas();
+    const ok = restoreSelection();
+    if (!ok) return setStatus?.("Select text first");
+
     const sel = window.getSelection();
-    if (!sel || sel.rangeCount === 0) return false;
+    if (!sel || sel.rangeCount === 0) return setStatus?.("Select text first");
     const r = sel.getRangeAt(0);
-    if (r.collapsed) return false;
+    if (r.collapsed) return setStatus?.("Select text first");
 
     const span = document.createElement("span");
     Object.assign(span.style, styleObj);
@@ -82,117 +78,33 @@ export default function RichTextToolbar({ editorRef, restoreSelection, rememberS
     nr.selectNodeContents(span);
     sel.addRange(nr);
 
-    return true;
+    rememberSelection();
   }
 
-  // ---- Preview snapshot handling ----
-  function beginPreview() {
-    const canvas = editorRef?.current;
-    if (!canvas) return;
-    if (snapRef.current) return;
-
-    // only snapshot if selection exists (otherwise preview does nothing)
-    const sel = window.getSelection();
-    if (!sel || sel.rangeCount === 0) return;
-
-    snapRef.current = {
-      html: canvas.innerHTML,
-    };
+  // instant apply handlers
+  function applyFont(v) {
+    setFont(v);
+    wrapStyle({ fontFamily: v });
+    setStatus?.(`Font: ${v}`);
   }
 
-  function endPreviewRestore() {
-    const canvas = editorRef?.current;
-    if (!canvas) return;
-    const snap = snapRef.current;
-    if (!snap) return;
-
-    canvas.innerHTML = snap.html;
-    snapRef.current = null;
-
-    // selection will be lost after innerHTML restore; just re-remember after next click
-    setStatus?.("Preview ended");
+  function applySize(v) {
+    const px = Number(v) || 16;
+    setSize(px);
+    wrapStyle({ fontSize: `${px}px` });
+    setStatus?.(`Size: ${px}px`);
   }
 
-  function commitPreview() {
-    // keep current DOM changes, just clear snapshot
-    snapRef.current = null;
+  function applyColor(v) {
+    setColor(v);
+    wrapStyle({ color: v });
+    setStatus?.(`Colour set`);
   }
 
-  // close dropdowns on outside click
-  useEffect(() => {
-    function onDoc() {
-      if (fontOpen || sizeOpen || colorOpen) {
-        // if user clicks outside while previewing, restore
-        if (snapRef.current) endPreviewRestore();
-        setFontOpen(false);
-        setSizeOpen(false);
-        setColorOpen(false);
-      }
-    }
-    document.addEventListener("mousedown", onDoc);
-    return () => document.removeEventListener("mousedown", onDoc);
-  }, [fontOpen, sizeOpen, colorOpen]);
-
-  // ---------- Actions ----------
-  function applyFontPreview(f) {
-    beginPreview();
-    restoreSelection();
-    const ok = wrapSelectionStyle({ fontFamily: f });
-    if (ok) setStatus?.(`Preview font: ${f}`);
-  }
-
-  function applyFontCommit(f) {
-    // commit current preview state (or apply if none)
-    if (!snapRef.current) {
-      restoreSelection();
-      const ok = wrapSelectionStyle({ fontFamily: f });
-      if (ok) setStatus?.(`Font set: ${f}`);
-      else setStatus?.("Select text first");
-    } else {
-      commitPreview();
-      setStatus?.(`Font set: ${f}`);
-    }
-    setFontOpen(false);
-  }
-
-  function applySizePreview(px) {
-    beginPreview();
-    restoreSelection();
-    const ok = wrapSelectionStyle({ fontSize: `${px}px` });
-    if (ok) setStatus?.(`Preview size: ${px}px`);
-  }
-
-  function applySizeCommit(px) {
-    if (!snapRef.current) {
-      restoreSelection();
-      const ok = wrapSelectionStyle({ fontSize: `${px}px` });
-      if (ok) setStatus?.(`Size set: ${px}px`);
-      else setStatus?.("Select text first");
-    } else {
-      commitPreview();
-      setStatus?.(`Size set: ${px}px`);
-    }
-    setSizeOpen(false);
-  }
-
-  function applyColorPreview(c) {
-    beginPreview();
-    restoreSelection();
-    const ok = wrapSelectionStyle({ color: c });
-    if (ok) setStatus?.(`Preview colour`);
-  }
-
-  function applyColorCommit(c) {
-    if (!snapRef.current) {
-      restoreSelection();
-      const ok = wrapSelectionStyle({ color: c });
-      if (ok) setStatus?.(`Colour set`);
-      else setStatus?.("Select text first");
-    } else {
-      commitPreview();
-      setStatus?.(`Colour set`);
-    }
-    setColorOpen(false);
+  function applyCustom() {
+    const v = String(custom || "").trim();
+    if (!v) return;
+    applyColor(v);
   }
 
   function clearFormatting() {
@@ -208,172 +120,100 @@ export default function RichTextToolbar({ editorRef, restoreSelection, rememberS
   return (
     <div className="rt" onMouseDown={(e) => e.stopPropagation()}>
       <div className="row">
-        <button className="ic" onMouseDown={(e) => e.preventDefault()} onClick={() => cmd("bold")}>
+        <button className="ic" onMouseDown={(e) => e.preventDefault()} onClick={() => exec("bold")}>
           B
         </button>
-        <button className="ic" onMouseDown={(e) => e.preventDefault()} onClick={() => cmd("italic")}>
+        <button className="ic" onMouseDown={(e) => e.preventDefault()} onClick={() => exec("italic")}>
           I
         </button>
-        <button className="ic" onMouseDown={(e) => e.preventDefault()} onClick={() => cmd("underline")}>
+        <button className="ic" onMouseDown={(e) => e.preventDefault()} onClick={() => exec("underline")}>
           U
         </button>
-        <button className="ic" onMouseDown={(e) => e.preventDefault()} onClick={() => cmd("strikeThrough")}>
+        <button className="ic" onMouseDown={(e) => e.preventDefault()} onClick={() => exec("strikeThrough")}>
           S
         </button>
       </div>
 
       <div className="row">
-        <button className="pill" onMouseDown={(e) => e.preventDefault()} onClick={() => cmd("justifyLeft")}>
+        <button className="pill" onMouseDown={(e) => e.preventDefault()} onClick={() => exec("justifyLeft")}>
           Left
         </button>
-        <button className="pill" onMouseDown={(e) => e.preventDefault()} onClick={() => cmd("justifyCenter")}>
+        <button className="pill" onMouseDown={(e) => e.preventDefault()} onClick={() => exec("justifyCenter")}>
           Center
         </button>
-        <button className="pill" onMouseDown={(e) => e.preventDefault()} onClick={() => cmd("justifyRight")}>
+        <button className="pill" onMouseDown={(e) => e.preventDefault()} onClick={() => exec("justifyRight")}>
           Right
         </button>
       </div>
 
       <div className="row">
-        <button className="pill" onMouseDown={(e) => e.preventDefault()} onClick={() => cmd("insertUnorderedList")}>
+        <button className="pill" onMouseDown={(e) => e.preventDefault()} onClick={() => exec("insertUnorderedList")}>
           • List
         </button>
-        <button className="pill" onMouseDown={(e) => e.preventDefault()} onClick={() => cmd("insertOrderedList")}>
+        <button className="pill" onMouseDown={(e) => e.preventDefault()} onClick={() => exec("insertOrderedList")}>
           1. List
         </button>
-        <button className="pill" onMouseDown={(e) => e.preventDefault()} onClick={() => cmd("outdent")}>
+        <button className="pill" onMouseDown={(e) => e.preventDefault()} onClick={() => exec("outdent")}>
           Out
         </button>
-        <button className="pill" onMouseDown={(e) => e.preventDefault()} onClick={() => cmd("indent")}>
+        <button className="pill" onMouseDown={(e) => e.preventDefault()} onClick={() => exec("indent")}>
           In
         </button>
       </div>
 
-      {/* FONT DROPDOWN (hover preview, click commit) */}
-      <div className="dd">
+      <div className="box">
         <div className="lab">Font</div>
-        <button
-          className="ddBtn"
-          onMouseDown={(e) => e.preventDefault()}
-          onClick={(e) => {
-            e.stopPropagation();
-            // closing restores preview if active
-            if (fontOpen && snapRef.current) endPreviewRestore();
-            setFontOpen((v) => !v);
-            setSizeOpen(false);
-            setColorOpen(false);
-          }}
+        <select
+          className="sel"
+          value={font}
+          onMouseDown={(e) => e.stopPropagation()}
+          onChange={(e) => applyFont(e.target.value)}
         >
-          Choose font ▾
-        </button>
-
-        {fontOpen && (
-          <div className="menu" onMouseDown={(e) => e.stopPropagation()}>
-            <div className="hint">Hover = preview • Click = set</div>
-            {SAFE_FONTS.map((f) => (
-              <div
-                key={f}
-                className="opt"
-                style={{ fontFamily: f }}
-                onMouseEnter={() => applyFontPreview(f)}
-                onMouseLeave={() => endPreviewRestore()}
-                onMouseDown={(e) => e.preventDefault()}
-                onClick={() => applyFontCommit(f)}
-              >
-                {f}
-              </div>
-            ))}
-          </div>
-        )}
+          {FONTS.map((f) => (
+            <option key={f} value={f}>
+              {f}
+            </option>
+          ))}
+        </select>
       </div>
 
-      {/* SIZE DROPDOWN */}
-      <div className="dd">
+      <div className="box">
         <div className="lab">Size</div>
-        <button
-          className="ddBtn"
-          onMouseDown={(e) => e.preventDefault()}
-          onClick={(e) => {
-            e.stopPropagation();
-            if (sizeOpen && snapRef.current) endPreviewRestore();
-            setSizeOpen((v) => !v);
-            setFontOpen(false);
-            setColorOpen(false);
-          }}
+        <select
+          className="sel"
+          value={size}
+          onMouseDown={(e) => e.stopPropagation()}
+          onChange={(e) => applySize(e.target.value)}
         >
-          Choose size ▾
-        </button>
-
-        {sizeOpen && (
-          <div className="menu" onMouseDown={(e) => e.stopPropagation()}>
-            <div className="hint">Hover = preview • Click = set</div>
-            <div className="grid">
-              {SIZE_OPTIONS.map((px) => (
-                <div
-                  key={px}
-                  className="opt2"
-                  onMouseEnter={() => applySizePreview(px)}
-                  onMouseLeave={() => endPreviewRestore()}
-                  onMouseDown={(e) => e.preventDefault()}
-                  onClick={() => applySizeCommit(px)}
-                >
-                  {px}px
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
+          {SIZES.map((s) => (
+            <option key={s} value={s}>
+              {s}px
+            </option>
+          ))}
+        </select>
       </div>
 
-      {/* COLOUR DROPDOWN */}
-      <div className="dd">
+      <div className="box">
         <div className="lab">Colour</div>
-        <button
-          className="ddBtn"
-          onMouseDown={(e) => e.preventDefault()}
-          onClick={(e) => {
-            e.stopPropagation();
-            if (colorOpen && snapRef.current) endPreviewRestore();
-            setColorOpen((v) => !v);
-            setFontOpen(false);
-            setSizeOpen(false);
-          }}
+        <select
+          className="sel"
+          value={color}
+          onMouseDown={(e) => e.stopPropagation()}
+          onChange={(e) => applyColor(e.target.value)}
         >
-          Choose colour ▾
-        </button>
+          {colors.map((c) => (
+            <option key={c} value={c}>
+              {c}
+            </option>
+          ))}
+        </select>
 
-        {colorOpen && (
-          <div className="menu" onMouseDown={(e) => e.stopPropagation()}>
-            <div className="hint">Hover = preview • Click = set</div>
-            <div className="swGrid">
-              {colors.map((c) => (
-                <button
-                  key={c}
-                  className="sw"
-                  style={{ background: c }}
-                  title={c}
-                  onMouseEnter={() => applyColorPreview(c)}
-                  onMouseLeave={() => endPreviewRestore()}
-                  onMouseDown={(e) => e.preventDefault()}
-                  onClick={() => applyColorCommit(c)}
-                />
-              ))}
-            </div>
-
-            <div className="custom">
-              <input className="hex" value={customHex} onChange={(e) => setCustomHex(e.target.value)} />
-              <button
-                className="set"
-                onMouseEnter={() => applyColorPreview(customHex)}
-                onMouseLeave={() => endPreviewRestore()}
-                onMouseDown={(e) => e.preventDefault()}
-                onClick={() => applyColorCommit(customHex)}
-              >
-                Set
-              </button>
-            </div>
-          </div>
-        )}
+        <div className="custom">
+          <input className="hex" value={custom} onChange={(e) => setCustom(e.target.value)} />
+          <button className="set" onMouseDown={(e) => e.preventDefault()} onClick={applyCustom}>
+            Set
+          </button>
+        </div>
       </div>
 
       <button className="clear" onMouseDown={(e) => e.preventDefault()} onClick={clearFormatting}>
@@ -386,12 +226,10 @@ export default function RichTextToolbar({ editorRef, restoreSelection, rememberS
           flex-direction: column;
           gap: 10px;
         }
-
         .row {
           display: flex;
           gap: 8px;
         }
-
         .ic {
           width: 44px;
           height: 36px;
@@ -402,7 +240,6 @@ export default function RichTextToolbar({ editorRef, restoreSelection, rememberS
           font-weight: 900;
           cursor: pointer;
         }
-
         .pill {
           flex: 1;
           height: 36px;
@@ -413,104 +250,29 @@ export default function RichTextToolbar({ editorRef, restoreSelection, rememberS
           font-weight: 900;
           cursor: pointer;
         }
-
-        .dd {
-          position: relative;
+        .box {
           border: 1px solid rgba(148, 163, 184, 0.18);
           background: rgba(2, 6, 23, 0.35);
           border-radius: 14px;
           padding: 10px;
         }
-
         .lab {
           font-size: 12px;
           color: rgba(226, 232, 240, 0.85);
           font-weight: 900;
           margin-bottom: 8px;
         }
-
-        .ddBtn {
+        .sel {
           width: 100%;
-          height: 40px;
+          height: 42px;
           border-radius: 12px;
           border: 1px solid rgba(148, 163, 184, 0.22);
           background: rgba(255, 255, 255, 0.06);
           color: #fff;
           font-weight: 900;
-          cursor: pointer;
-          text-align: left;
-          padding: 0 12px;
+          outline: none;
+          padding: 0 10px;
         }
-
-        .menu {
-          position: absolute;
-          left: 10px;
-          right: 10px;
-          top: 78px;
-          z-index: 30;
-          border-radius: 14px;
-          border: 1px solid rgba(148, 163, 184, 0.22);
-          background: rgba(2, 6, 23, 0.98);
-          box-shadow: 0 20px 60px rgba(0, 0, 0, 0.55);
-          padding: 10px;
-          max-height: 320px;
-          overflow: auto;
-        }
-
-        .hint {
-          font-size: 11px;
-          font-weight: 900;
-          color: rgba(226, 232, 240, 0.8);
-          margin-bottom: 8px;
-        }
-
-        .opt {
-          padding: 10px 10px;
-          border-radius: 10px;
-          cursor: pointer;
-          color: #fff;
-          font-weight: 900;
-          border: 1px solid transparent;
-        }
-        .opt:hover {
-          border-color: rgba(34, 197, 94, 0.5);
-          background: rgba(34, 197, 94, 0.12);
-        }
-
-        .grid {
-          display: grid;
-          grid-template-columns: repeat(4, 1fr);
-          gap: 8px;
-        }
-        .opt2 {
-          height: 36px;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          border-radius: 10px;
-          cursor: pointer;
-          color: #fff;
-          font-weight: 900;
-          border: 1px solid rgba(148, 163, 184, 0.18);
-          background: rgba(255, 255, 255, 0.06);
-        }
-        .opt2:hover {
-          border-color: rgba(34, 197, 94, 0.5);
-          background: rgba(34, 197, 94, 0.12);
-        }
-
-        .swGrid {
-          display: grid;
-          grid-template-columns: repeat(7, 1fr);
-          gap: 8px;
-        }
-        .sw {
-          height: 26px;
-          border-radius: 10px;
-          border: 1px solid rgba(148, 163, 184, 0.22);
-          cursor: pointer;
-        }
-
         .custom {
           display: flex;
           gap: 8px;
@@ -518,7 +280,7 @@ export default function RichTextToolbar({ editorRef, restoreSelection, rememberS
         }
         .hex {
           flex: 1;
-          height: 38px;
+          height: 40px;
           border-radius: 12px;
           padding: 0 12px;
           border: 1px solid rgba(148, 163, 184, 0.22);
@@ -529,7 +291,7 @@ export default function RichTextToolbar({ editorRef, restoreSelection, rememberS
         }
         .set {
           width: 74px;
-          height: 38px;
+          height: 40px;
           border-radius: 12px;
           border: 1px solid rgba(34, 197, 94, 0.35);
           background: rgba(34, 197, 94, 0.22);
@@ -537,7 +299,6 @@ export default function RichTextToolbar({ editorRef, restoreSelection, rememberS
           font-weight: 900;
           cursor: pointer;
         }
-
         .clear {
           height: 44px;
           border-radius: 12px;

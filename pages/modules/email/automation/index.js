@@ -1,8 +1,11 @@
 ﻿// /pages/modules/email/automation/index.js
-// FULL REPLACEMENT — Trigger shows Active members + no Run Now
-// ✅ Trigger node shows active members count
-// ✅ Uses /api/automation/engine/node-stats
-// ✅ Does NOT require a Run Now button (server cron tick handles running)
+// FULL REPLACEMENT — Automation Builder + WORKING Members Modal (lists + import + members)
+// ✅ Uses existing endpoint: /api/automation/members/add-list (NOT import-list)
+// ✅ Shows REAL server error + debug if import fails
+// ✅ Lists load correctly (uses list.id as value)
+// ✅ Members load + click opens lead modal callback
+// ✅ Keeps your banner/layout (only Members modal internals touched)
+// ✅ NEW: If import returns 0, shows server message + debug so we can see EXACTLY why
 
 import { useEffect, useMemo, useState, useCallback, useRef } from "react";
 import Head from "next/head";
@@ -94,13 +97,13 @@ function AutomationBuilder() {
     setTimeout(() => setToast(""), 2000);
   };
 
-  const getToken = async () => {
+  const getToken = useCallback(async () => {
     const { data } = await supabase.auth.getSession();
     return data?.session?.access_token || null;
-  };
+  }, []);
 
   const openLeadFromMembers = (lead) => {
-    if (!lead?.id) return;
+    if (!lead?.id && !lead?.lead_id) return;
     setMembersOpen(false);
     setSelectedLead(lead);
     setIsLeadModalOpen(true);
@@ -250,7 +253,8 @@ function AutomationBuilder() {
               : n.type === "condition"
               ? conditionColor
               : n.data.color,
-          activeCount: n.type === "trigger" ? triggerActive : n.data?.activeCount,
+          activeCount:
+            n.type === "trigger" ? triggerActive : n.data?.activeCount,
         },
       }))
     );
@@ -403,7 +407,10 @@ function AutomationBuilder() {
       setNodes((nds) =>
         nds.map((n) => {
           if (n.type === "trigger") {
-            return { ...n, data: { ...n.data, activeCount: Number(j.trigger_active || 0) } };
+            return {
+              ...n,
+              data: { ...n.data, activeCount: Number(j.trigger_active || 0) },
+            };
           }
           if (n.type !== "email") return n;
           const s = (j.stats || {})?.[n.id] || {
@@ -506,22 +513,6 @@ function AutomationBuilder() {
           >
             🔀 Condition
           </button>
-
-          <button
-            onClick={() => {
-              if (!flowId) return toastMsg("Load a flow first.");
-              fetchNodeStats();
-              toastMsg("Stats refreshed");
-            }}
-            style={{
-              ...btn("#111827"),
-              color: "#e5e7eb",
-              border: "1px solid rgba(148,163,184,0.25)",
-              background: "rgba(2,6,23,0.25)",
-            }}
-          >
-            📊 Refresh Stats
-          </button>
         </div>
 
         <div style={{ maxWidth: 1320, width: "100%", margin: "0 auto" }}>
@@ -542,10 +533,10 @@ function AutomationBuilder() {
               <div style={{ fontSize: 48 }}>⚙️</div>
 
               <div>
-                <div style={{ fontSize: 40, fontWeight: 700 }}>
+                <div style={{ fontSize: 48, fontWeight: 700 }}>
                   Automation Builder
                 </div>
-                <div style={{ fontSize: 16, fontWeight: 400 }}>
+                <div style={{ fontSize: 18, fontWeight: 400 }}>
                   Workflows, triggers and actions.
                 </div>
               </div>
@@ -624,14 +615,14 @@ function AutomationBuilder() {
                         display: "flex",
                         alignItems: "center",
                         justifyContent: "space-between",
-                        fontSize: 13,
+                        fontSize: 16,
                         color: "#9ca3af",
                       }}
                     >
                       <span style={{ fontWeight: 600 }}>File</span>
                       <span
                         style={{
-                          fontSize: 11,
+                          fontSize: 16,
                           padding: "2px 8px",
                           borderRadius: 999,
                           border: "1px solid rgba(148,163,184,0.4)",
@@ -662,7 +653,7 @@ function AutomationBuilder() {
                       style={{
                         padding: "6px 16px 4px",
                         color: "#9ca3af",
-                        fontSize: 12,
+                        fontSize: 16,
                         fontWeight: 600,
                         textTransform: "uppercase",
                         letterSpacing: 0.5,
@@ -688,7 +679,7 @@ function AutomationBuilder() {
                       style={{
                         padding: "6px 16px 4px",
                         color: "#9ca3af",
-                        fontSize: 12,
+                        fontSize: 16,
                         fontWeight: 600,
                         textTransform: "uppercase",
                         letterSpacing: 0.5,
@@ -771,9 +762,7 @@ function AutomationBuilder() {
           >
             <div style={{ fontWeight: 900, fontSize: 16, color: "#e5e7eb" }}>
               Current Flow:{" "}
-              <span style={{ color: "#93c5fd" }}>
-                {flowName || "Untitled"}{" "}
-              </span>
+              <span style={{ color: "#93c5fd" }}>{flowName || "Untitled"} </span>
               <span style={{ color: "#22c55e", marginLeft: 10 }}>
                 (Active: {triggerActive})
               </span>
@@ -829,16 +818,14 @@ function AutomationBuilder() {
         </div>
       </div>
 
-      {/* Members + drawers unchanged from your version */}
       {membersOpen && (
         <FlowMembersModal
           isOpen={membersOpen}
           onClose={() => setMembersOpen(false)}
           flowId={flowId}
           flowName={flowName}
-          authUserId={authUserId}
-          accountId={accountId}
           onOpenLead={openLeadFromMembers}
+          getToken={getToken}
         />
       )}
 
@@ -950,14 +937,522 @@ function AutomationBuilder() {
   );
 }
 
-/* MEMBERS MODAL — you already pasted yours earlier; keep it as-is */
-function FlowMembersModal() {
-  return null;
+/* ---------------- MEMBERS MODAL (WORKING) ---------------- */
+function FlowMembersModal({
+  isOpen,
+  onClose,
+  flowId,
+  flowName,
+  onOpenLead,
+  getToken,
+}) {
+  const [lists, setLists] = useState([]);
+  const [selectedListId, setSelectedListId] = useState("");
+  const [members, setMembers] = useState([]);
+  const [count, setCount] = useState(0);
+  const [busy, setBusy] = useState(false);
+
+  const [toast, setToast] = useState("");
+  const [lastDebug, setLastDebug] = useState(null);
+
+  const toastMsg = (m) => {
+    setToast(m);
+    setTimeout(() => setToast(""), 3200);
+  };
+
+  const loadLists = useCallback(async () => {
+    try {
+      const token = await getToken();
+      if (!token) return;
+
+      const res = await fetch("/api/automation/lists", {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const j = await res.json().catch(() => null);
+      if (!res.ok || !j?.ok) {
+        const msg2 = j?.error || `HTTP ${res.status}`;
+        toastMsg(`Lists failed: ${msg2}`);
+        return;
+      }
+
+      const arr = j.lists || [];
+      setLists(arr);
+
+      const stillValid = arr.some(
+        (x) => String(x.id) === String(selectedListId)
+      );
+      if ((!selectedListId || !stillValid) && arr[0]?.id) {
+        setSelectedListId(arr[0].id);
+      }
+    } catch (e) {
+      toastMsg(`Lists failed: ${e?.message || String(e)}`);
+    }
+  }, [getToken, selectedListId]);
+
+  const loadMembers = useCallback(async () => {
+    if (!flowId) return;
+    try {
+      const token = await getToken();
+      if (!token) return;
+
+      const res = await fetch(
+        `/api/automation/flow-members?flow_id=${encodeURIComponent(flowId)}`,
+        {
+          headers: { Authorization: `Bearer ${token}` },
+        }
+      );
+      const j = await res.json().catch(() => null);
+      if (!res.ok || !j?.ok) {
+        const msg2 = j?.error || `HTTP ${res.status}`;
+        toastMsg(`Members failed: ${msg2}`);
+        return;
+      }
+
+      setMembers(j.members || []);
+      setCount(Number(j.count || (j.members || []).length || 0));
+    } catch (e) {
+      toastMsg(`Members failed: ${e?.message || String(e)}`);
+    }
+  }, [flowId, getToken]);
+
+  const importSelectedList = useCallback(async () => {
+    if (!flowId) return;
+    if (!selectedListId) return toastMsg("Pick a list first.");
+
+    setBusy(true);
+    setLastDebug(null);
+
+    try {
+      const token = await getToken();
+      if (!token) throw new Error("Missing session token.");
+
+      const res = await fetch("/api/automation/members/add-list", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ flow_id: flowId, list_id: selectedListId }),
+      });
+
+      const j = await res.json().catch(() => null);
+
+      if (!res.ok || !j?.ok) {
+        setLastDebug(j?.debug || null);
+        const extra = j?.debug
+          ? `\n\nDEBUG:\n${JSON.stringify(j.debug, null, 2)}`
+          : "";
+        throw new Error((j?.error || `HTTP ${res.status}`) + extra);
+      }
+
+      // ✅ Always store debug (even on success) so we can see why it imported 0
+      setLastDebug(j?.debug || null);
+
+      const inserted = Number(j.inserted ?? j.imported ?? j.inserted_count ?? 0);
+      const existing = Number(j.existing ?? j.total_existing ?? 0);
+      const reactivated = Number(j.reactivated ?? 0);
+      const total = Number(j.total ?? (inserted + existing) ?? 0);
+
+      // Show message + a compact debug summary when it imports 0
+      if (inserted === 0 && existing === 0 && reactivated === 0) {
+        const win = j?.debug?.memberWinning;
+        const keys = j?.debug?.memberRowKeys;
+        const extract = j?.debug?.extract;
+        const leadCol = j?.debug?.leadsEmailCol;
+
+        const summary = [
+          `Imported: 0 • Reactivated: 0 • Total: 0`,
+          j?.message ? `Message: ${j.message}` : null,
+          win ? `Member source: ${win.table} via ${win.fk} (rows: ${win.rows})` : null,
+          keys?.length ? `Member row keys: ${keys.join(", ")}` : null,
+          extract ? `Extract: leadIds=${extract.directLeadIds} emails=${extract.emails}` : null,
+          leadCol ? `Leads email column: ${leadCol}` : null,
+          `↓ Open DEBUG panel below`,
+        ]
+          .filter(Boolean)
+          .join("\n");
+
+        toastMsg(summary);
+      } else {
+        toastMsg(
+          `Imported: ${inserted} • Reactivated: ${reactivated} • Total: ${total}`
+        );
+      }
+
+      await loadMembers();
+    } catch (e) {
+      toastMsg(`Import failed: ${e?.message || String(e)}`);
+    } finally {
+      setBusy(false);
+    }
+  }, [flowId, selectedListId, getToken, loadMembers]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    loadLists();
+    loadMembers();
+  }, [isOpen, loadLists, loadMembers]);
+
+  if (!isOpen) return null;
+
+  return (
+    <div
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "rgba(0,0,0,0.55)",
+        zIndex: 99999,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: 20,
+      }}
+      onMouseDown={onClose}
+    >
+      <div
+        style={{
+          width: "min(980px, 95vw)",
+          background: "linear-gradient(180deg, #0b1224, #070b18)",
+          border: "1px solid rgba(148,163,184,0.18)",
+          borderRadius: 14,
+          boxShadow: "0 20px 60px rgba(0,0,0,0.7)",
+          overflow: "hidden",
+        }}
+        onMouseDown={(e) => e.stopPropagation()}
+      >
+        <div
+          style={{
+            padding: "10px 14px",
+            borderBottom: "1px solid rgba(148,163,184,0.16)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 10,
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <div style={{ fontWeight: 700 }}>👥 Flow Members</div>
+            <div style={{ color: "#dfbe2dff", fontSize: 16 }}>
+              {flowName || "Untitled"} • {flowId}
+            </div>
+          </div>
+
+          <button
+            onClick={onClose}
+            style={{
+              background: "transparent",
+              border: "1px solid rgba(148,163,184,0.25)",
+              color: "#e5e7eb",
+              borderRadius: 10,
+              padding: "6px 10px",
+              cursor: "pointer",
+              fontWeight: 600,
+            }}
+          >
+            ✕
+          </button>
+        </div>
+
+        <div style={{ padding: 14 }}>
+          <div style={{ fontSize: 16, color: "#94a3b8", fontWeight: 600 }}>
+            ADD A LIST TO THIS FLOW
+          </div>
+
+          <div
+            style={{
+              marginTop: 8,
+              display: "flex",
+              gap: 10,
+              alignItems: "center",
+              flexWrap: "wrap",
+            }}
+          >
+            <select
+              value={selectedListId}
+              onChange={(e) => setSelectedListId(e.target.value)}
+              style={{
+                minWidth: 320,
+                background: "#0b1022",
+                color: "#e5e7eb",
+                border: "1px solid rgba(148,163,184,0.22)",
+                borderRadius: 10,
+                padding: "10px 12px",
+                fontWeight: 600,
+                outline: "none",
+              }}
+            >
+              {(lists || []).map((l) => (
+                <option key={l.id} value={l.id}>
+                  {l.name || "Untitled List"}
+                </option>
+              ))}
+              {!lists?.length && <option value="">No lists found</option>}
+            </select>
+
+            <button
+              onClick={importSelectedList}
+              disabled={busy || !selectedListId}
+              style={{
+                background: "#22c55e",
+                border: "none",
+                color: "#071022",
+                padding: "10px 14px",
+                borderRadius: 999,
+                fontWeight: 700,
+                cursor: busy ? "not-allowed" : "pointer",
+                opacity: busy ? 0.65 : 1,
+              }}
+            >
+              {busy ? "Importing…" : "Import"}
+            </button>
+
+            <div
+              style={{
+                marginLeft: "auto",
+                padding: "10px 12px",
+                borderRadius: 999,
+                border: "1px solid rgba(148,163,184,0.22)",
+                fontWeight: 700,
+                color: "#e5e7eb",
+              }}
+            >
+              Count: {count}
+            </div>
+          </div>
+
+          <div style={{ marginTop: 12, color: "#94a3b8", fontSize: 16 }}>
+            If import fails OR imports 0, the debug panel below will show why.
+          </div>
+
+          <div
+            style={{
+              marginTop: 12,
+              border: "1px solid rgba(148,163,184,0.16)",
+              borderRadius: 12,
+              overflow: "hidden",
+            }}
+          >
+            <div
+              style={{
+                padding: "10px 12px",
+                background: "rgba(148,163,184,0.06)",
+                fontWeight: 700,
+                color: "#e5e7eb",
+                display: "flex",
+                justifyContent: "space-between",
+              }}
+            >
+              <span>MEMBERS IN THIS FLOW</span>
+              <span style={{ color: "#94a3b8", fontSize: 16 }}>
+                Click a member to open
+              </span>
+            </div>
+
+            <div style={{ maxHeight: 320, overflow: "auto" }}>
+              {!members?.length ? (
+                <div style={{ padding: 14, color: "#94a3b8" }}>
+                  No members yet.
+                </div>
+              ) : (
+                members.map((m) => (
+                  <button
+                    key={m.id || `${m.lead_id}-${m.created_at || ""}`}
+                    onClick={() => onOpenLead && onOpenLead(m)}
+                    style={{
+                      width: "100%",
+                      textAlign: "left",
+                      background: "transparent",
+                      border: "none",
+                      borderTop: "1px solid rgba(148,163,184,0.10)",
+                      padding: "10px 12px",
+                      cursor: "pointer",
+                      color: "#e5e7eb",
+                    }}
+                    onMouseEnter={(e) =>
+                      (e.currentTarget.style.background =
+                        "rgba(148,163,184,0.06)")
+                    }
+                    onMouseLeave={(e) =>
+                      (e.currentTarget.style.background = "transparent")
+                    }
+                  >
+                    <div style={{ fontWeight: 700 }}>
+                      {m.name || m.email || m.phone || m.lead_id}
+                    </div>
+                    <div style={{ fontSize: 16, color: "#94a3b8" }}>
+                      {m.email ? `Email: ${m.email} • ` : ""}
+                      {m.phone ? `Phone: ${m.phone} • ` : ""}
+                      Status: {m.status || "active"}
+                    </div>
+                  </button>
+                ))
+              )}
+            </div>
+          </div>
+
+          {toast && (
+            <div
+              style={{
+                marginTop: 10,
+                padding: "10px 12px",
+                borderRadius: 12,
+                border: "1px solid rgba(148,163,184,0.18)",
+                background: "rgba(2,6,23,0.65)",
+                fontWeight: 700,
+                color: "#e5e7eb",
+                whiteSpace: "pre-wrap",
+              }}
+            >
+              {toast}
+            </div>
+          )}
+
+          {lastDebug && (
+            <details
+              style={{
+                marginTop: 10,
+                borderRadius: 12,
+                border: "1px solid rgba(148,163,184,0.18)",
+                background: "rgba(2,6,23,0.55)",
+                padding: 10,
+              }}
+            >
+              <summary style={{ cursor: "pointer", fontWeight: 900, color: "#93c5fd" }}>
+                DEBUG (click to open)
+              </summary>
+              <pre
+                style={{
+                  marginTop: 10,
+                  whiteSpace: "pre-wrap",
+                  wordBreak: "break-word",
+                  fontSize: 13,
+                  color: "#e5e7eb",
+                }}
+              >
+                {JSON.stringify(lastDebug, null, 2)}
+              </pre>
+            </details>
+          )}
+        </div>
+      </div>
+    </div>
+  );
 }
 
-/* SAVE AS MODAL — you already have yours earlier; keep it as-is */
-function SaveAsModal() {
-  return null;
+/* ---------------- SAVE AS MODAL ---------------- */
+function SaveAsModal({ isOpen, onClose, currentName, onSaveAs }) {
+  const [name, setName] = useState(currentName || "");
+  useEffect(() => setName(currentName || ""), [currentName]);
+  if (!isOpen) return null;
+
+  return (
+    <div
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "rgba(0,0,0,0.55)",
+        zIndex: 99999,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: 20,
+      }}
+      onMouseDown={onClose}
+    >
+      <div
+        style={{
+          width: "min(520px, 95vw)",
+          background: "linear-gradient(180deg, #0b1224, #070b18)",
+          border: "1px solid rgba(148,163,184,0.18)",
+          borderRadius: 14,
+          boxShadow: "0 20px 60px rgba(0,0,0,0.7)",
+          overflow: "hidden",
+        }}
+        onMouseDown={(e) => e.stopPropagation()}
+      >
+        <div
+          style={{
+            padding: "10px 14px",
+            borderBottom: "1px solid rgba(148,163,184,0.16)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+          }}
+        >
+          <div style={{ fontWeight: 700 }}>📄 Save As…</div>
+          <button
+            onClick={onClose}
+            style={{
+              background: "transparent",
+              border: "1px solid rgba(148,163,184,0.25)",
+              color: "#e5e7eb",
+              borderRadius: 10,
+              padding: "6px 10px",
+              cursor: "pointer",
+              fontWeight: 600,
+            }}
+          >
+            ✕
+          </button>
+        </div>
+
+        <div style={{ padding: 14 }}>
+          <div style={{ color: "#94a3b8", fontSize: 16, fontWeight: 600 }}>
+            NEW FLOW NAME
+          </div>
+
+          <input
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="My new flow name"
+            style={{
+              width: "100%",
+              marginTop: 8,
+              background: "#0b1022",
+              color: "#e5e7eb",
+              border: "1px solid rgba(148,163,184,0.22)",
+              borderRadius: 10,
+              padding: "10px 12px",
+              fontWeight: 600,
+              outline: "none",
+            }}
+          />
+
+          <div style={{ marginTop: 12, display: "flex", gap: 10 }}>
+            <button
+              onClick={() => onSaveAs && onSaveAs(name || "Untitled Flow")}
+              style={{
+                background: "#22c55e",
+                border: "none",
+                color: "#071022",
+                padding: "10px 14px",
+                borderRadius: 999,
+                fontWeight: 700,
+                cursor: "pointer",
+              }}
+            >
+              Save As
+            </button>
+
+            <button
+              onClick={onClose}
+              style={{
+                background: "#0b1022",
+                border: "1px solid rgba(148,163,184,0.22)",
+                color: "#e5e7eb",
+                padding: "10px 14px",
+                borderRadius: 999,
+                fontWeight: 700,
+                cursor: "pointer",
+              }}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 // UI helpers
@@ -967,7 +1462,7 @@ const btn = (c) => ({
   color: "#0b1120",
   padding: "14px 14px",
   borderRadius: 12,
-  fontWeight: 800,
+  fontWeight: 600,
   cursor: "pointer",
   boxShadow: "0 10px 30px rgba(0,0,0,0.35)",
   fontSize: 16,
@@ -981,7 +1476,7 @@ const toastStyle = {
   border: "1px solid rgba(148,163,184,0.25)",
   padding: "10px 12px",
   borderRadius: 12,
-  fontWeight: 800,
+  fontWeight: 600,
   color: "#e5e7eb",
 };
 
@@ -1009,8 +1504,8 @@ function DropdownItem({ label, onClick }) {
         padding: "10px 16px",
         color: "#e5e7eb",
         cursor: "pointer",
-        fontSize: 14,
-        fontWeight: 700,
+        fontSize: 16,
+        fontWeight: 600,
       }}
       onMouseEnter={(e) =>
         (e.currentTarget.style.background = "rgba(148,163,184,0.08)")

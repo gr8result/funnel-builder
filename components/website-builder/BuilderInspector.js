@@ -31,8 +31,10 @@ export default function BuilderInspector({
         <label style={styles.label}>Max width</label>
         <input
           type="number"
-          value={Number(theme.maxWidth || 980)}
-          onChange={(e) => onUpdateTheme({ maxWidth: Number(e.target.value || 980) })}
+          value={Number(theme.maxWidth || 1440)}
+          onChange={(e) =>
+            onUpdateTheme({ maxWidth: Number(e.target.value || 1440) })
+          }
           style={styles.input}
         />
       </div>
@@ -50,7 +52,9 @@ export default function BuilderInspector({
             <input
               type="number"
               value={Number(p?.paddingY ?? 48)}
-              onChange={(e) => onUpdateBlockProps({ paddingY: Number(e.target.value || 0) })}
+              onChange={(e) =>
+                onUpdateBlockProps({ paddingY: Number(e.target.value || 0) })
+              }
               style={styles.input}
             />
 
@@ -58,7 +62,9 @@ export default function BuilderInspector({
             <input
               type="number"
               value={Number(p?.paddingX ?? 20)}
-              onChange={(e) => onUpdateBlockProps({ paddingX: Number(e.target.value || 0) })}
+              onChange={(e) =>
+                onUpdateBlockProps({ paddingX: Number(e.target.value || 0) })
+              }
               style={styles.input}
             />
 
@@ -66,7 +72,9 @@ export default function BuilderInspector({
             <input
               type="number"
               value={Number(p?.radius ?? 14)}
-              onChange={(e) => onUpdateBlockProps({ radius: Number(e.target.value || 0) })}
+              onChange={(e) =>
+                onUpdateBlockProps({ radius: Number(e.target.value || 0) })
+              }
               style={styles.input}
             />
 
@@ -117,8 +125,20 @@ const styles = {
   sub: { color: "rgba(255,255,255,0.7)", fontSize: 12, marginTop: 2 },
 
   section: { padding: 12 },
-  sectionTitle: { color: "white", fontSize: 13, fontWeight: 950, marginBottom: 10 },
-  label: { display: "block", color: "rgba(255,255,255,0.75)", fontSize: 12, fontWeight: 800, marginTop: 10, marginBottom: 6 },
+  sectionTitle: {
+    color: "white",
+    fontSize: 13,
+    fontWeight: 950,
+    marginBottom: 10,
+  },
+  label: {
+    display: "block",
+    color: "rgba(255,255,255,0.75)",
+    fontSize: 12,
+    fontWeight: 800,
+    marginTop: 10,
+    marginBottom: 6,
+  },
   input: {
     width: "100%",
     background: "rgba(255,255,255,0.06)",

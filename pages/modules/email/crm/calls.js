@@ -175,7 +175,10 @@ export default function CallsAndVoicemails() {
     clearBanner();
 
     try {
-      const res = await fetch("/api/twilio/list-calls");
+      const auth = await getBearer();
+      const res = await fetch("/api/twilio/list-calls", {
+        headers: auth ? { Authorization: auth } : {},
+      });
       const data = await res.json().catch(() => ({}));
 
       if (!res.ok || data.ok === false) {
@@ -400,9 +403,13 @@ export default function CallsAndVoicemails() {
     clearBanner();
 
     try {
+      const auth = await getBearer();
       const res = await fetch("/api/telephony/send-sms", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...(auth ? { Authorization: auth } : {}),
+        },
         body: JSON.stringify({ to: num, message: msg }),
       });
       const data = await res.json().catch(() => ({}));
@@ -483,7 +490,10 @@ export default function CallsAndVoicemails() {
           return;
         }
 
-        const res = await fetch("/api/twilio/list-calls");
+        const auth = await getBearer();
+        const res = await fetch("/api/twilio/list-calls", {
+          headers: auth ? { Authorization: auth } : {},
+        });
         const data = await res.json().catch(() => ({}));
         if (!res.ok || data.ok === false) return;
 
@@ -522,9 +532,13 @@ export default function CallsAndVoicemails() {
     clearBanner();
 
     try {
+      const auth = await getBearer();
       const res = await fetch("/api/telephony/make-call", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...(auth ? { Authorization: auth } : {}),
+        },
         body: JSON.stringify({ to: num, lead_id: selectedContactId || null, record: true }),
       });
       const data = await res.json().catch(() => ({}));
@@ -674,9 +688,7 @@ export default function CallsAndVoicemails() {
                 <button className="btn btnSMS" onClick={sendSMS} disabled={sendingSMS}>
                   {sendingSMS ? "Sending..." : "Send SMS"}
                 </button>
-                {recordWatch ? (
-                  <span style={{ opacity: 0.85, fontWeight: 700 }}>Watching for recording…</span>
-                ) : null}
+                {recordWatch ? <span style={{ opacity: 0.85, fontWeight: 700 }}>Watching for recording…</span> : null}
               </div>
             </div>
           </div>

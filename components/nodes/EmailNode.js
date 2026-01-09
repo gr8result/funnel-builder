@@ -14,8 +14,8 @@ function StatRow({ label, value }) {
         borderRadius: 10,
         border: "1px solid rgba(255,255,255,0.22)",
         background: "rgba(2,6,23,0.22)",
-        fontSize: 12,
-        fontWeight: 900,
+        fontSize: 16,
+        fontWeight: 600,
         color: "#fff",
         lineHeight: 1.1,
       }}
@@ -65,10 +65,10 @@ export default function EmailNode({ data }) {
     >
       {/* HEADER */}
       <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
-        <div style={{ fontSize: 18, fontWeight: 1000 }}>
+        <div style={{ fontSize: 18, fontWeight: 600 }}>
           ✉️ {data?.label || "Email"}
         </div>
-        <div style={{ fontSize: 12, fontWeight: 900, opacity: 0.9 }}>
+        <div style={{ fontSize: 16, fontWeight: 600, opacity: 0.9 }}>
           {data?.emailName || "No email selected"}
         </div>
       </div>
@@ -94,7 +94,7 @@ export default function EmailNode({ data }) {
             boxShadow: "0 0 10px rgba(0,0,0,0.35)",
           }}
         >
-          <div style={{ fontSize: 11, fontWeight: 900, opacity: 0.9, marginBottom: 6 }}>
+          <div style={{ fontSize: 16, fontWeight: 600, opacity: 0.9, marginBottom: 6 }}>
             Preview
           </div>
 
@@ -121,7 +121,7 @@ export default function EmailNode({ data }) {
                 }}
               />
             ) : (
-              <div style={{ fontSize: 11, fontWeight: 900, opacity: 0.85, padding: 10 }}>
+              <div style={{ fontSize: 16, fontWeight: 600, opacity: 0.85, padding: 10 }}>
                 No preview
               </div>
             )}
@@ -139,8 +139,8 @@ export default function EmailNode({ data }) {
           <div
             style={{
               marginTop: 4,
-              fontSize: 11,
-              fontWeight: 900,
+              fontSize: 16,
+              fontWeight: 500,
               opacity: 0.9,
               padding: "6px 10px",
               borderRadius: 10,

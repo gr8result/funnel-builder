@@ -1,471 +1,621 @@
 // /pages/api/automation/members/add-list.js
 // FULL REPLACEMENT
-// POST { flow_id, list_id, list_table? }
 //
-// ✅ Imports members from whichever list table exists
-// ✅ Supports ownership by accounts.id OR auth.users.id
-// ✅ Tries member tables in order:
-//    - email_list_members (email_lists)
-//    - lead_list_members (lead_lists)
-//    - list_members (lists)
-// ✅ Creates leads if missing, then upserts automation_flow_members
-// ✅ AUTO-START: Enqueues the FIRST node after the Trigger into automation_queue (no "Run Now" required)
+// ✅ Imports list members into automation_flow_members
+// ✅ ALSO creates/ensures automation_flow_runs so the engine can actually PROCESS after import
+// ✅ Works with your real tables shown:
+//    - automation_flow_members (user_id, flow_id, lead_id, status, source, created_at, updated_at) UNIQUE(flow_id,lead_id)
+//    - automation_flow_runs    (user_id, flow_id, lead_id, current_node_id, status, available_at, source, last_error, created_at, updated_at)
+// ✅ Handles list member schema drift (email_list_members + list_id, etc.)
+// ✅ Returns hard debug
 
 import { createClient } from "@supabase/supabase-js";
 
 const SUPABASE_URL =
   process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL;
+
 const SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 
 const supabaseAdmin = createClient(SUPABASE_URL, SERVICE_KEY, {
   auth: { persistSession: false, autoRefreshToken: false },
 });
+const supabaseAuth = createClient(SUPABASE_URL, ANON_KEY, {
+  auth: { persistSession: false, autoRefreshToken: false },
+});
 
-function getBearer(req) {
-  const h = req.headers?.authorization || req.headers?.Authorization || "";
-  const m = String(h).match(/^Bearer\s+(.+)$/i);
-  return m ? m[1] : null;
+const NOW = () => new Date().toISOString();
+
+function msg(err) {
+  return err?.message || err?.hint || err?.details || String(err || "");
 }
 
-function isMissingTable(err) {
-  const msg = String(err?.message || "").toLowerCase();
+function isMissing(err) {
+  const code = String(err?.code || "");
+  const m = msg(err).toLowerCase();
   return (
-    msg.includes("does not exist") ||
-    msg.includes("relation") ||
-    err?.code === "42P01"
+    code === "42P01" || // undefined_table
+    code === "42703" || // undefined_column
+    m.includes("does not exist") ||
+    m.includes("undefined column") ||
+    m.includes("relation") ||
+    m.includes("column")
   );
 }
 
-async function getAccountId(auth_user_id) {
-  try {
-    const { data, error } = await supabaseAdmin
-      .from("accounts")
-      .select("id")
-      .eq("user_id", auth_user_id)
+async function hasColumn(table, col) {
+  const { error } = await supabaseAdmin.from(table).select(col).limit(1);
+  if (!error) return true;
+  if (isMissing(error)) return false;
+  return false;
+}
+
+async function getAuthUserId(req) {
+  const auth = String(req.headers.authorization || "");
+  if (auth.toLowerCase().startsWith("bearer ")) {
+    const token = auth.slice(7);
+    const { data, error } = await supabaseAuth.auth.getUser(token);
+    if (!error && data?.user?.id) return data.user.id;
+  }
+  return req.body?.user_id || null;
+}
+
+async function getAccountIdForUser(user_id) {
+  if (!user_id) return null;
+  const { data, error } = await supabaseAdmin
+    .from("accounts")
+    .select("id")
+    .eq("user_id", user_id)
+    .maybeSingle();
+  if (error) return null;
+  return data?.id || null;
+}
+
+function ownerSet(auth_user_id, account_id) {
+  const s = new Set();
+  if (auth_user_id) s.add(auth_user_id);
+  if (account_id) s.add(account_id);
+  return s;
+}
+
+/** Try selecting flow with account_id and user_id, but tolerate missing columns */
+async function loadFlow(flow_id) {
+  {
+    const r = await supabaseAdmin
+      .from("automation_flows")
+      .select("id,user_id,account_id")
+      .eq("id", flow_id)
       .maybeSingle();
-    if (error) return null;
-    return data?.id || null;
-  } catch {
-    return null;
+
+    if (!r.error) return { ok: true, flow: r.data, mode: "id,user_id,account_id" };
+    if (!isMissing(r.error)) return { ok: false, error: r.error };
+  }
+
+  {
+    const r = await supabaseAdmin
+      .from("automation_flows")
+      .select("id,user_id")
+      .eq("id", flow_id)
+      .maybeSingle();
+
+    if (!r.error) return { ok: true, flow: r.data, mode: "id,user_id" };
+    return { ok: false, error: r.error };
   }
 }
 
-async function findListRecord(list_id, ownerIds, preferredTable = null) {
-  const listTables = preferredTable
-    ? [preferredTable, "email_lists", "lead_lists", "lists"].filter(
-        (v, i, a) => a.indexOf(v) === i
-      )
-    : ["email_lists", "lead_lists", "lists"];
+async function findListRecord({ list_id, owners, debug }) {
+  const listTables = ["email_lists", "lead_lists"];
 
   for (const table of listTables) {
-    try {
-      const { data, error } = await supabaseAdmin
+    {
+      const r = await supabaseAdmin
         .from(table)
         .select("id,name,user_id")
         .eq("id", list_id)
-        .single();
+        .maybeSingle();
 
-      if (error) {
-        if (isMissingTable(error)) continue;
-        const msg = String(error.message || "").toLowerCase();
-        if (msg.includes("0 rows") || msg.includes("multiple")) continue;
-        continue;
+      debug.listChecks.push({
+        table,
+        select: "id,name,user_id",
+        found: !!r.data?.id,
+        error: r.error ? msg(r.error) : null,
+      });
+
+      if (!r.error && r.data?.id) {
+        const owner = r.data.user_id;
+        if (owner && !owners.has(owner)) return { ok: false, reason: "wrong_owner", table };
+        return { ok: true, table, list: r.data };
       }
 
-      const owner = String(data?.user_id || "");
-      const okOwner = ownerIds.some((o) => String(o) === owner);
-      if (!okOwner) return { ok: false, error: "List not owned by user" };
+      if (r.error && isMissing(r.error)) {
+        const r2 = await supabaseAdmin
+          .from(table)
+          .select("id,name")
+          .eq("id", list_id)
+          .maybeSingle();
 
-      return { ok: true, table, list: data };
-    } catch (e) {
-      if (isMissingTable(e)) continue;
+        debug.listChecks.push({
+          table,
+          select: "id,name",
+          found: !!r2.data?.id,
+          error: r2.error ? msg(r2.error) : null,
+        });
+
+        if (!r2.error && r2.data?.id) return { ok: true, table, list: r2.data };
+      }
     }
   }
 
-  return { ok: false, error: "List not found" };
+  return { ok: false, reason: "not_found" };
 }
 
-async function fetchMembersForList(list_id, list_table) {
-  const tries =
-    list_table === "email_lists"
-      ? ["email_list_members", "lead_list_members", "list_members"]
-      : list_table === "lead_lists"
-      ? ["lead_list_members", "email_list_members", "list_members"]
-      : ["list_members", "email_list_members", "lead_list_members"];
-
-  for (const memTable of tries) {
-    try {
-      const { data, error } = await supabaseAdmin
-        .from(memTable)
-        .select("email,name,phone")
-        .eq("list_id", list_id);
-
-      if (error) {
-        if (isMissingTable(error)) continue;
-        return { ok: false, error: error.message };
-      }
-
-      return { ok: true, table: memTable, members: data || [] };
-    } catch (e) {
-      if (isMissingTable(e)) continue;
-      return { ok: false, error: e?.message || String(e) };
-    }
-  }
-
-  return { ok: true, table: null, members: [] };
+function normalizeEmail(v) {
+  return String(v || "").trim().toLowerCase();
 }
 
-// ---------------- FLOW LOADING + GRAPH HELPERS ----------------
+function extractLeadIdsOrEmails(rows, debug) {
+  const leadIds = [];
+  const emails = [];
 
-async function loadFlow(flow_id, ownerIds) {
-  const flowTables = [
-    { table: "automation_flows", jsonCol: "flow_json" },
-    { table: "automation_flows", jsonCol: "definition" },
-    { table: "email_automations", jsonCol: "flow_json" },
-    { table: "email_automations", jsonCol: "definition" },
-    { table: "automation_workflows", jsonCol: "flow_json" },
-    { table: "automation_workflows", jsonCol: "definition" },
+  const leadIdKeys = [
+    "lead_id",
+    "leadId",
+    "lead_uuid",
+    "leadUuid",
+    "contact_id",
+    "contactId",
+    "contact_uuid",
+    "contactUuid",
+    "person_id",
+    "personId",
+    "member_id",
+    "memberId",
+    "subscriber_id",
+    "subscriberId",
+    "customer_id",
+    "customerId",
   ];
 
-  for (const t of flowTables) {
-    try {
-      const { data, error } = await supabaseAdmin
-        .from(t.table)
-        .select(`id,user_id,${t.jsonCol}`)
-        .eq("id", flow_id)
-        .single();
+  const emailKeys = [
+    "email",
+    "email_address",
+    "emailAddress",
+    "lead_email",
+    "leadEmail",
+    "contact_email",
+    "contactEmail",
+    "subscriber_email",
+    "subscriberEmail",
+  ];
 
-      if (error) {
-        if (isMissingTable(error)) continue;
-        const msg = String(error.message || "").toLowerCase();
-        if (msg.includes("0 rows") || msg.includes("multiple")) continue;
-        continue;
+  for (const r of rows || []) {
+    let lid = null;
+    for (const k of leadIdKeys) {
+      if (r && r[k]) {
+        lid = r[k];
+        break;
+      }
+    }
+    if (lid) leadIds.push(lid);
+
+    let em = "";
+    for (const k of emailKeys) {
+      if (r && r[k]) {
+        em = normalizeEmail(r[k]);
+        break;
+      }
+    }
+    if (em) emails.push(em);
+  }
+
+  const out = {
+    leadIds: leadIds.filter(Boolean),
+    emails: [...new Set(emails.filter(Boolean))],
+  };
+
+  debug.extract = { directLeadIds: out.leadIds.length, emails: out.emails.length };
+  return out;
+}
+
+function chunk(arr, size) {
+  const out = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+}
+
+function buildIlikeOr(col, values) {
+  return values
+    .map((v) => `${col}.ilike.${String(v).replace(/,/g, "")}`)
+    .join(",");
+}
+
+async function detectLeadsEmailColumn(debug) {
+  const hasEmail = await hasColumn("leads", "email");
+  if (hasEmail) {
+    debug.leadsEmailCol = "email";
+    return "email";
+  }
+  const hasEmailAddress = await hasColumn("leads", "email_address");
+  if (hasEmailAddress) {
+    debug.leadsEmailCol = "email_address";
+    return "email_address";
+  }
+  debug.leadsEmailCol = "email";
+  return "email";
+}
+
+async function resolveEmailsToLeadIds({ emails, owners, debug }) {
+  if (!emails?.length) return [];
+  const emailCol = await detectLeadsEmailColumn(debug);
+
+  // IN + owner (fast path)
+  for (const owner of owners) {
+    const r = await supabaseAdmin
+      .from("leads")
+      .select(`id,${emailCol},user_id`)
+      .in(emailCol, emails)
+      .eq("user_id", owner);
+
+    debug.leadResolveChecks.push({
+      mode: "IN + owner(user_id)",
+      owner,
+      emailCol,
+      rows: Array.isArray(r.data) ? r.data.length : 0,
+      error: r.error ? msg(r.error) : null,
+    });
+
+    if (!r.error && Array.isArray(r.data) && r.data.length) {
+      return r.data.map((x) => x.id).filter(Boolean);
+    }
+
+    if (r.error && isMissing(r.error)) break;
+  }
+
+  // IN without owner
+  {
+    const r2 = await supabaseAdmin
+      .from("leads")
+      .select(`id,${emailCol}`)
+      .in(emailCol, emails);
+
+    debug.leadResolveChecks.push({
+      mode: "IN (no owner)",
+      emailCol,
+      rows: Array.isArray(r2.data) ? r2.data.length : 0,
+      error: r2.error ? msg(r2.error) : null,
+    });
+
+    if (!r2.error && Array.isArray(r2.data) && r2.data.length) {
+      return r2.data.map((x) => x.id).filter(Boolean);
+    }
+  }
+
+  // ILIKE OR chunks (case-insensitive exact)
+  const chunks = chunk(emails, 25);
+
+  for (const owner of owners) {
+    for (const c of chunks) {
+      const orStr = buildIlikeOr(emailCol, c);
+      const r = await supabaseAdmin
+        .from("leads")
+        .select(`id,${emailCol},user_id`)
+        .or(orStr)
+        .eq("user_id", owner);
+
+      debug.leadResolveChecks.push({
+        mode: "ILIKE OR chunk + owner(user_id)",
+        owner,
+        emailCol,
+        chunk: c.length,
+        rows: Array.isArray(r.data) ? r.data.length : 0,
+        error: r.error ? msg(r.error) : null,
+      });
+
+      if (!r.error && Array.isArray(r.data) && r.data.length) {
+        return r.data.map((x) => x.id).filter(Boolean);
       }
 
-      const owner = String(data?.user_id || "");
-      const okOwner = ownerIds.some((o) => String(o) === owner);
-      if (!okOwner) return { ok: false, error: "Flow not owned by user" };
-
-      const raw = data?.[t.jsonCol];
-      const flow_json =
-        typeof raw === "string"
-          ? (() => {
-              try {
-                return JSON.parse(raw);
-              } catch {
-                return null;
-              }
-            })()
-          : raw;
-
-      if (!flow_json) continue;
-
-      return { ok: true, table: t.table, jsonCol: t.jsonCol, flow: flow_json };
-    } catch (e) {
-      if (isMissingTable(e)) continue;
+      if (r.error && isMissing(r.error)) break;
     }
   }
 
-  return { ok: false, error: "Flow not found" };
+  for (const c of chunks) {
+    const orStr = buildIlikeOr(emailCol, c);
+    const r = await supabaseAdmin
+      .from("leads")
+      .select(`id,${emailCol}`)
+      .or(orStr);
+
+    debug.leadResolveChecks.push({
+      mode: "ILIKE OR chunk (no owner)",
+      emailCol,
+      chunk: c.length,
+      rows: Array.isArray(r.data) ? r.data.length : 0,
+      error: r.error ? msg(r.error) : null,
+    });
+
+    if (!r.error && Array.isArray(r.data) && r.data.length) {
+      return r.data.map((x) => x.id).filter(Boolean);
+    }
+  }
+
+  return [];
 }
 
-function normalizeFlowGraph(flow_json) {
-  // expected shapes:
-  // { nodes: [...], edges: [...] }
-  // or { reactflow: { nodes, edges } }
-  const g =
-    flow_json?.reactflow?.nodes && flow_json?.reactflow?.edges
-      ? flow_json.reactflow
-      : flow_json;
+async function loadMemberRows({ list_id, debug }) {
+  // IMPORTANT: your debug proved lead_list_members does NOT exist in schema cache,
+  // and email_list_members exists and uses list_id.
+  // We still probe safely.
+  const candidates = [
+    { table: "email_list_members", fks: ["list_id", "email_list_id"] },
+    { table: "lead_list_members", fks: ["list_id", "lead_list_id"] },
+    { table: "list_members", fks: ["list_id", "lead_list_id", "email_list_id"] },
+    { table: "lead_list_subscribers", fks: ["list_id", "lead_list_id"] },
+    { table: "email_list_subscribers", fks: ["list_id", "email_list_id"] },
+  ];
 
-  const nodes = Array.isArray(g?.nodes) ? g.nodes : [];
-  const edges = Array.isArray(g?.edges) ? g.edges : [];
-  return { nodes, edges };
+  for (const c of candidates) {
+    for (const fk of c.fks) {
+      const r = await supabaseAdmin.from(c.table).select("*").eq(fk, list_id);
+
+      debug.memberChecks.push({
+        table: c.table,
+        fk,
+        rows: Array.isArray(r.data) ? r.data.length : 0,
+        error: r.error ? msg(r.error) : null,
+      });
+
+      if (!r.error) {
+        const rows = Array.isArray(r.data) ? r.data : [];
+        const sample = rows.slice(0, 3);
+        debug.memberWinning = { table: c.table, fk, rows: rows.length };
+        debug.memberRowSample = sample;
+        debug.memberRowKeys = sample[0] ? Object.keys(sample[0]) : [];
+        return { ok: true, table: c.table, fk, rows };
+      }
+    }
+  }
+
+  return { ok: false, table: null, fk: null, rows: [] };
 }
 
-function findTriggerNodeId(nodes) {
-  // try common patterns
-  const trigger =
-    nodes.find((n) => n?.type === "trigger") ||
-    nodes.find((n) => n?.data?.kind === "trigger") ||
-    nodes.find((n) => String(n?.data?.label || "").toLowerCase().includes("lead")) ||
-    nodes[0];
-  return trigger?.id || null;
-}
+/**
+ * Insert memberships using the REAL schema you showed.
+ * automation_flow_members requires user_id + flow_id + lead_id (NOT NULL).
+ */
+async function upsertMembers({ flow_id, leadIds, auth_user_id, debug }) {
+  const now = NOW();
 
-function findFirstOutgoing(edges, fromId) {
-  const e = edges.find((x) => x?.source === fromId);
-  return e?.target || null;
-}
+  // Dedup: only insert those not already in table for this flow
+  const { data: existing, error: exErr } = await supabaseAdmin
+    .from("automation_flow_members")
+    .select("lead_id,status")
+    .eq("flow_id", flow_id)
+    .in("lead_id", leadIds);
 
-function firstNodeAfterTrigger(flow_json) {
-  const { nodes, edges } = normalizeFlowGraph(flow_json);
-  const trigId = findTriggerNodeId(nodes);
-  if (!trigId) return null;
-  return findFirstOutgoing(edges, trigId);
-}
+  if (exErr) return { ok: false, error: msg(exErr) };
 
-async function safeInsertQueueRows(rows) {
-  if (!rows.length) return { ok: true, inserted: 0 };
+  const existingMap = new Map((existing || []).map((r) => [r.lead_id, r.status]));
+  const toInsert = [];
+  const toReactivate = [];
 
-  // Try insert; if duplicates exist, you can still allow duplicates OR implement de-dupe by checking existing.
-  // We'll de-dupe by checking existing pending rows for (flow_id, lead_id, next_node_id, status=pending)
-  const flow_id = rows[0].flow_id;
-  const leadIds = rows.map((r) => r.lead_id).filter(Boolean);
-  const nextNodeIds = Array.from(new Set(rows.map((r) => r.next_node_id).filter(Boolean)));
+  for (const lid of leadIds) {
+    const s = existingMap.get(lid);
+    if (!s) toInsert.push(lid);
+    else if (String(s).toLowerCase() !== "active") toReactivate.push(lid);
+  }
 
-  try {
-    const { data: existing, error: exErr } = await supabaseAdmin
-      .from("automation_queue")
-      .select("id,lead_id,next_node_id,status")
+  debug.membersPlan = {
+    leadIds: leadIds.length,
+    toInsert: toInsert.length,
+    toReactivate: toReactivate.length,
+    alreadyActive: leadIds.length - toInsert.length - toReactivate.length,
+  };
+
+  if (toInsert.length) {
+    const payload = toInsert.map((lead_id) => ({
+      user_id: auth_user_id,
+      flow_id,
+      lead_id,
+      status: "active",
+      source: "list_import",
+      created_at: now,
+      updated_at: now,
+    }));
+
+    const { error } = await supabaseAdmin.from("automation_flow_members").insert(payload);
+    if (error) return { ok: false, error: msg(error) };
+  }
+
+  let reactivated = 0;
+  if (toReactivate.length) {
+    const { error } = await supabaseAdmin
+      .from("automation_flow_members")
+      .update({ status: "active", updated_at: now })
       .eq("flow_id", flow_id)
-      .in("lead_id", leadIds)
-      .in("next_node_id", nextNodeIds)
-      .eq("status", "pending");
+      .in("lead_id", toReactivate);
 
-    if (!exErr) {
-      const exists = new Set(
-        (existing || []).map((x) => `${x.lead_id}:${x.next_node_id}:pending`)
-      );
-      const filtered = rows.filter(
-        (r) => !exists.has(`${r.lead_id}:${r.next_node_id}:pending`)
-      );
-      if (!filtered.length) return { ok: true, inserted: 0 };
-
-      const { error: insErr } = await supabaseAdmin
-        .from("automation_queue")
-        .insert(filtered);
-
-      if (insErr) return { ok: false, error: insErr.message };
-      return { ok: true, inserted: filtered.length };
-    }
-  } catch {
-    // fall through to simple insert
+    if (!error) reactivated = toReactivate.length;
+    else debug.memberReactivateError = msg(error);
   }
 
-  const { error } = await supabaseAdmin.from("automation_queue").insert(rows);
-  if (error) return { ok: false, error: error.message };
-  return { ok: true, inserted: rows.length };
+  return {
+    ok: true,
+    inserted: toInsert.length,
+    existing: (existing || []).length,
+    reactivated,
+    total: toInsert.length + (existing || []).length,
+    toInsert,
+    toReactivate,
+  };
+}
+
+/**
+ * CRITICAL FIX:
+ * Create/ensure runs so the engine actually advances from Trigger -> Email.
+ * automation_flow_runs: (user_id, flow_id, lead_id, status, available_at, current_node_id)
+ */
+async function ensureRuns({ flow_id, leadIds, auth_user_id, debug }) {
+  const now = NOW();
+
+  // Read existing active runs
+  const { data: existing, error: exErr } = await supabaseAdmin
+    .from("automation_flow_runs")
+    .select("id,lead_id,status")
+    .eq("flow_id", flow_id)
+    .in("lead_id", leadIds)
+    .in("status", ["active"]); // keep simple
+
+  debug.runEnsure = debug.runEnsure || {};
+  if (exErr) {
+    debug.runEnsure.error = msg(exErr);
+    // don't fail the whole import if runs table has an issue
+    return { ok: false, error: msg(exErr) };
+  }
+
+  const haveActive = new Set((existing || []).map((r) => r.lead_id));
+  const toCreate = leadIds.filter((id) => !haveActive.has(id));
+
+  // If there are older runs in non-active statuses, we can just create new ones (or you can reactivate later)
+  if (!toCreate.length) {
+    debug.runEnsure = { existingActive: (existing || []).length, created: 0 };
+    return { ok: true, created: 0 };
+  }
+
+  const payload = toCreate.map((lead_id) => ({
+    user_id: auth_user_id,
+    flow_id,
+    lead_id,
+    current_node_id: null, // start at trigger
+    status: "active",
+    available_at: now,
+    source: "list_import",
+    last_error: null,
+    created_at: now,
+    updated_at: now,
+  }));
+
+  const { error: insErr } = await supabaseAdmin.from("automation_flow_runs").insert(payload);
+
+  if (insErr) {
+    debug.runEnsure = { existingActive: (existing || []).length, createAttempt: payload.length, error: msg(insErr) };
+    return { ok: false, error: msg(insErr) };
+  }
+
+  debug.runEnsure = { existingActive: (existing || []).length, created: payload.length };
+  return { ok: true, created: payload.length };
 }
 
 export default async function handler(req, res) {
-  if (req.method !== "POST") {
-    res.setHeader("Allow", "POST");
-    return res.status(405).json({ ok: false, error: "POST only" });
-  }
+  if (req.method !== "POST") return res.status(405).json({ ok: false, error: "POST only" });
+
+  const debug = {
+    flowSelectMode: null,
+    auth_user_id: null,
+    account_id: null,
+    owners: [],
+    flowOwner: null,
+    listChecks: [],
+    memberChecks: [],
+    memberWinning: null,
+    memberRowKeys: [],
+    memberRowSample: [],
+    extract: null,
+    leadsEmailCol: null,
+    leadResolveChecks: [],
+    membersPlan: null,
+    runEnsure: null,
+  };
 
   try {
-    const { flow_id, list_id, list_table } = req.body || {};
+    const flow_id = String(req.body?.flow_id || "").trim();
+    const list_id = String(req.body?.list_id || "").trim();
+
     if (!flow_id || !list_id) {
-      return res
-        .status(400)
-        .json({ ok: false, error: "Missing flow_id or list_id" });
+      return res.status(400).json({ ok: false, error: "flow_id and list_id required" });
     }
 
-    const token = getBearer(req);
-    if (!token)
-      return res.status(401).json({ ok: false, error: "Missing Bearer token" });
+    const auth_user_id = await getAuthUserId(req);
+    debug.auth_user_id = auth_user_id;
+    if (!auth_user_id) return res.status(401).json({ ok: false, error: "Missing/invalid auth", debug });
 
-    const { data: userData, error: userErr } = await supabaseAdmin.auth.getUser(
-      token
-    );
-    if (userErr || !userData?.user?.id) {
-      return res.status(401).json({ ok: false, error: "Invalid session" });
+    const account_id = await getAccountIdForUser(auth_user_id);
+    debug.account_id = account_id;
+
+    const owners = ownerSet(auth_user_id, account_id);
+    debug.owners = [...owners];
+
+    const lf = await loadFlow(flow_id);
+    if (!lf.ok) return res.status(500).json({ ok: false, error: msg(lf.error), debug });
+    debug.flowSelectMode = lf.mode;
+
+    const flow = lf.flow;
+    if (!flow?.id) return res.status(404).json({ ok: false, error: "Flow not found", debug });
+
+    const flowOwner = flow.account_id || flow.user_id || null;
+    debug.flowOwner = flowOwner;
+
+    if (flowOwner && !owners.has(flowOwner)) {
+      return res.status(403).json({ ok: false, error: "Not allowed for this flow", debug });
     }
 
-    const auth_user_id = userData.user.id;
-    const account_id = await getAccountId(auth_user_id);
-    const ownerIds = [account_id, auth_user_id].filter(Boolean);
-
-    const listFound = await findListRecord(list_id, ownerIds, list_table || null);
-    if (!listFound.ok) {
-      return res.status(404).json({ ok: false, error: listFound.error });
+    const listLookup = await findListRecord({ list_id, owners, debug });
+    if (!listLookup.ok) {
+      return res.status(404).json({
+        ok: false,
+        error: listLookup.reason === "wrong_owner" ? "List belongs to a different owner" : "List not found",
+        debug,
+      });
     }
 
-    const { table: detectedListTable, list } = listFound;
+    const memberLoad = await loadMemberRows({ list_id, debug });
+    if (!memberLoad.ok) {
+      return res.status(500).json({
+        ok: false,
+        error: "Could not read list members (membership table/column mismatch)",
+        debug,
+      });
+    }
 
-    const mem = await fetchMembersForList(list_id, detectedListTable);
-    if (!mem.ok) return res.status(500).json({ ok: false, error: mem.error });
+    const { leadIds: directLeadIds, emails } = extractLeadIdsOrEmails(memberLoad.rows, debug);
 
-    const rawMembers = mem.members || [];
-    const emails = Array.from(
-      new Set(
-        rawMembers
-          .map((m) => String(m.email || "").trim().toLowerCase())
-          .filter(Boolean)
-      )
-    );
+    let leadIds = [...new Set((directLeadIds || []).filter(Boolean))];
+    if (!leadIds.length && emails.length) {
+      const resolved = await resolveEmailsToLeadIds({ emails, owners, debug });
+      leadIds = [...new Set((resolved || []).filter(Boolean))];
+    }
 
-    if (emails.length === 0) {
+    if (!leadIds.length) {
       return res.json({
         ok: true,
-        list_name: list?.name || null,
-        list_table: detectedListTable,
-        members_table: mem.table,
-        imported: 0,
-        leads_created: 0,
-        enrolled: 0,
-        enqueued: 0,
+        inserted: 0,
+        existing: 0,
+        reactivated: 0,
+        total: 0,
+        runs_created: 0,
+        message: "List has no resolvable members (no lead_id matched and email resolve found 0).",
+        debug,
       });
     }
 
-    // IMPORTANT: your leads table uses user_id (likely accounts.id).
-    const leads_owner_id = account_id || auth_user_id;
+    // 1) Upsert membership rows (REAL schema)
+    const mem = await upsertMembers({ flow_id, leadIds, auth_user_id, debug });
+    if (!mem.ok) return res.status(500).json({ ok: false, error: mem.error, debug });
 
-    const { data: existingLeads, error: existingErr } = await supabaseAdmin
-      .from("leads")
-      .select("id,email")
-      .eq("user_id", leads_owner_id)
-      .in("email", emails);
-
-    if (existingErr)
-      return res.status(500).json({ ok: false, error: existingErr.message });
-
-    const leadMap = new Map(
-      (existingLeads || []).map((l) => [
-        String(l.email || "").toLowerCase(),
-        l.id,
-      ])
-    );
-
-    const toInsert = [];
-    for (const m of rawMembers) {
-      const email = String(m.email || "").trim().toLowerCase();
-      if (!email || leadMap.has(email)) continue;
-      toInsert.push({
-        user_id: leads_owner_id,
-        email,
-        name: m.name || null,
-        phone: m.phone || null,
-        list_id, // keep lead tied to list
-      });
-    }
-
-    let leads_created = 0;
-    if (toInsert.length > 0) {
-      const { data: inserted, error: insErr } = await supabaseAdmin
-        .from("leads")
-        .insert(toInsert)
-        .select("id,email");
-
-      if (insErr)
-        return res.status(500).json({ ok: false, error: insErr.message });
-
-      for (const l of inserted || []) {
-        leadMap.set(String(l.email || "").toLowerCase(), l.id);
-      }
-      leads_created = inserted?.length || 0;
-    }
-
-    const enroll = [];
-    for (const email of emails) {
-      const lead_id = leadMap.get(email);
-      if (!lead_id) continue;
-
-      enroll.push({
-        user_id: leads_owner_id,
-        flow_id,
-        lead_id,
-        status: "active",
-        source: "list",
-        list_id,
-      });
-    }
-
-    let enrolled = 0;
-    if (enroll.length > 0) {
-      const { data, error: upErr } = await supabaseAdmin
-        .from("automation_flow_members")
-        .upsert(enroll, { onConflict: "flow_id,lead_id" })
-        .select("id,lead_id");
-
-      if (upErr)
-        return res.status(500).json({ ok: false, error: upErr.message });
-
-      enrolled = data?.length || 0;
-    }
-
-    // ✅ AUTO-START: enqueue first node after trigger for all enrolled leads
-    const flowLoaded = await loadFlow(flow_id, ownerIds);
-    if (!flowLoaded.ok) {
-      // flow missing shouldn't block list import; just return enrolled
-      return res.json({
-        ok: true,
-        list_name: list?.name || null,
-        list_table: detectedListTable,
-        members_table: mem.table,
-        imported: emails.length,
-        leads_created,
-        enrolled,
-        enqueued: 0,
-        warn: flowLoaded.error,
-      });
-    }
-
-    const next_node_id = firstNodeAfterTrigger(flowLoaded.flow);
-    if (!next_node_id) {
-      return res.json({
-        ok: true,
-        list_name: list?.name || null,
-        list_table: detectedListTable,
-        members_table: mem.table,
-        imported: emails.length,
-        leads_created,
-        enrolled,
-        enqueued: 0,
-        warn: "No node connected after trigger",
-      });
-    }
-
-    const now = new Date().toISOString();
-    const queueRows = [];
-    for (const email of emails) {
-      const lead_id = leadMap.get(email);
-      if (!lead_id) continue;
-
-      queueRows.push({
-        user_id: leads_owner_id,
-        subscriber_id: lead_id, // keep compatibility with your existing column naming
-        flow_id,
-        lead_id,
-        list_id,
-        next_node_id,
-        run_at: now,
-        status: "pending",
-        created_at: now,
-        updated_at: now,
-      });
-    }
-
-    const q = await safeInsertQueueRows(queueRows);
-    if (!q.ok) {
-      return res.json({
-        ok: true,
-        list_name: list?.name || null,
-        list_table: detectedListTable,
-        members_table: mem.table,
-        imported: emails.length,
-        leads_created,
-        enrolled,
-        enqueued: 0,
-        warn: `Queue insert failed: ${q.error}`,
-      });
-    }
+    // 2) CRITICAL: Ensure runs exist so engine can advance
+    // We ensure runs for ALL leadIds (inserted + existing), because you might import into a flow that had members already but no runs.
+    const runs = await ensureRuns({ flow_id, leadIds, auth_user_id, debug });
 
     return res.json({
       ok: true,
-      list_name: list?.name || null,
-      list_table: detectedListTable,
-      members_table: mem.table,
-      imported: emails.length,
-      leads_created,
-      enrolled,
-      enqueued: q.inserted,
-      first_node_id: next_node_id,
+      inserted: mem.inserted,
+      existing: mem.existing,
+      reactivated: mem.reactivated,
+      total: mem.total,
+      runs_created: runs?.created || 0,
+      debug,
     });
   } catch (e) {
-    return res
-      .status(500)
-      .json({ ok: false, error: e?.message || String(e) });
+    return res.status(500).json({ ok: false, error: msg(e), debug });
   }
 }
