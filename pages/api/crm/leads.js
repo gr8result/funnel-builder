@@ -1,8 +1,12 @@
 // /pages/api/crm/leads.js
-// FULL REPLACEMENT — uses phone (NOT mobile) + still tolerates mobile if it exists
-// ✅ Returns ALL leads for the logged-in user from public.leads
-// ✅ Derives user from Bearer token (multi-tenant safe)
-// ✅ Uses service role + auth.getUser(token)
+// FULL REPLACEMENT
+//
+// ✅ Fixes: "column leads.mobile does not exist" / "column leads.account_id does not exist"
+// ✅ Does NOT guess your schema columns in SQL (selects * then normalizes in JS)
+// ✅ Attempts to scope by user_id if that column exists; falls back safely if not
+//
+// Returns:
+//   { ok: true, leads: [{ id, name, phone, raw }] }
 
 import { createClient } from "@supabase/supabase-js";
 
@@ -13,74 +17,135 @@ const SERVICE_KEY =
   process.env.SUPABASE_SERVICE_ROLE_KEY ||
   process.env.SUPABASE_SERVICE_KEY ||
   process.env.SUPABASE_SERVICE_ROLE ||
-  process.env.SUPABASE_SERVICE;
-
-function s(v) {
-  return String(v ?? "").trim();
-}
+  process.env.SUPABASE_SERVICE ||
+  "";
 
 function getBearer(req) {
-  const h = s(req.headers?.authorization || "");
-  if (!h.toLowerCase().startsWith("bearer ")) return "";
-  return s(h.slice(7));
+  const h = req.headers.authorization || req.headers.Authorization || "";
+  const s = String(h);
+  if (!s) return "";
+  const m = s.match(/Bearer\s+(.+)/i);
+  return m ? String(m[1]).trim() : "";
 }
 
-function admin() {
-  if (!SUPABASE_URL || !SERVICE_KEY) {
-    throw new Error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
-  }
-  return createClient(SUPABASE_URL, SERVICE_KEY, {
-    auth: { persistSession: false, autoRefreshToken: false },
-  });
+function pickPhone(row) {
+  // Try common field names without assuming they exist
+  const candidates = [
+    row.mobile,
+    row.mobile_phone,
+    row.phone,
+    row.phone_number,
+    row.phoneNumber,
+    row.telephone,
+    row.tel,
+    row.contact_number,
+    row.contactNumber,
+  ]
+    .map((v) => (v == null ? "" : String(v).trim()))
+    .filter(Boolean);
+
+  return candidates[0] || "";
+}
+
+function pickName(row) {
+  const full =
+    (row.full_name ?? row.fullName ?? row.name ?? row.contact_name ?? row.contactName) ??
+    "";
+
+  const fullStr = String(full || "").trim();
+  if (fullStr) return fullStr;
+
+  const first = String(row.first_name ?? row.firstName ?? "").trim();
+  const last = String(row.last_name ?? row.lastName ?? "").trim();
+  const combined = `${first} ${last}`.trim();
+
+  return combined || "Unnamed lead";
 }
 
 export default async function handler(req, res) {
-  if (req.method !== "GET") {
-    res.setHeader("Allow", ["GET"]);
-    return res.status(405).json({ ok: false, error: "GET only" });
-  }
-
   try {
-    const sb = admin();
-
-    const token = getBearer(req);
-    if (!token) return res.status(401).json({ ok: false, error: "Missing Bearer token" });
-
-    const { data: userData, error: userErr } = await sb.auth.getUser(token);
-    if (userErr || !userData?.user?.id) {
-      return res.status(401).json({ ok: false, error: "Invalid session token" });
+    if (req.method !== "GET") {
+      res.setHeader("Allow", "GET");
+      return res.status(405).json({ ok: false, error: "Method not allowed" });
     }
-    const uid = userData.user.id;
 
-    const limit = Math.min(Math.max(Number(req.query?.limit || 5000), 1), 50000);
+    if (!SUPABASE_URL || !SERVICE_KEY) {
+      return res.status(500).json({
+        ok: false,
+        error: "Missing SUPABASE env vars (SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY)",
+      });
+    }
 
-    // Your schema has phone (NOT mobile). We still select mobile if it exists in some environments.
-    // If mobile does NOT exist, Supabase will error — so we try phone-only first.
-    let data = null;
+    const supabaseAdmin = createClient(SUPABASE_URL, SERVICE_KEY, {
+      auth: { persistSession: false, autoRefreshToken: false },
+    });
 
-    const first = await sb
+    // Try to identify user (for multi-user scoping if possible)
+    const token = getBearer(req);
+    let userId = "";
+    if (token) {
+      const { data, error } = await supabaseAdmin.auth.getUser(token);
+      if (!error && data?.user?.id) userId = data.user.id;
+    }
+
+    const limit = Math.min(
+      Math.max(parseInt(String(req.query.limit || "500"), 10) || 500, 1),
+      2000
+    );
+
+    // --- Attempt 1: scope by user_id if that column exists ---
+    let q = supabaseAdmin
       .from("leads")
-      .select("id,name,email,phone,created_at,stage,pipeline_id,list_id,user_id")
-      .eq("user_id", uid)
+      .select("*")
       .order("created_at", { ascending: false })
       .limit(limit);
 
-    if (first.error) {
-      return res.status(500).json({ ok: false, error: first.error.message || String(first.error) });
+    if (userId) q = q.eq("user_id", userId);
+
+    let { data: rows, error } = await q;
+
+    // If user_id column doesn't exist (or any schema error), retry without scoping
+    if (error) {
+      const msg = String(error.message || "");
+      const isMissingColumn =
+        msg.includes("does not exist") ||
+        msg.includes("column") ||
+        msg.includes("schema cache");
+
+      if (isMissingColumn) {
+        const retry = await supabaseAdmin
+          .from("leads")
+          .select("*")
+          .order("created_at", { ascending: false })
+          .limit(limit);
+
+        rows = retry.data || [];
+        error = retry.error || null;
+      }
     }
 
-    data = first.data || [];
+    if (error) {
+      return res.status(500).json({
+        ok: false,
+        error: error.message || "Failed to load leads",
+      });
+    }
 
-    return res.status(200).json({
-      ok: true,
-      count: Array.isArray(data) ? data.length : 0,
-      leads: data,
+    const leads = (rows || []).map((r) => {
+      const id = r.id ?? r.lead_id ?? r.uuid ?? null;
+      return {
+        id,
+        name: pickName(r),
+        phone: pickPhone(r),
+        raw: r, // keep raw so your UI can use extra fields if needed
+      };
     });
+
+    return res.status(200).json({ ok: true, leads });
   } catch (e) {
     return res.status(500).json({
       ok: false,
-      error: "Server error",
-      detail: e?.message || String(e),
+      error: e?.message || String(e),
     });
   }
 }

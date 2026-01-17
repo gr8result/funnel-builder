@@ -1,276 +1,180 @@
 // /pages/api/smsglobal/SMSGlobalSMSSend.js
-// FULL REPLACEMENT — single SMS send via SMSGlobal MAC auth + LOG INTO sms_queue
+// FULL REPLACEMENT — Single SMS sender that works with lead picker
 //
-// ✅ Derives user from Bearer token (so it’s tied to the logged in user)
-// ✅ Sends SMS via SMSGlobal
-// ✅ Inserts a row into sms_queue AFTER send (so you SEE it in Supabase again)
-// ✅ Ensures lead_id is NOT NULL by creating/finding a lead for the destination number
+// ✅ Accepts: { lead_id, message, origin? } OR { to, message, origin? }
+// ✅ If lead_id is provided, it looks up phone from public.leads
+// ✅ Validates origin against allowed list, otherwise falls back
+// ✅ Uses SMSGlobal MAC auth
 
-import crypto from "crypto";
 import { createClient } from "@supabase/supabase-js";
+import { buildSmsGlobalMacHeader } from "../../../lib/smsglobal/macAuth";
 
-const SUPABASE_URL =
-  process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL;
-const SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL;
+const SERVICE_KEY =
+  process.env.SUPABASE_SERVICE_ROLE_KEY ||
+  process.env.SUPABASE_SERVICE_KEY ||
+  process.env.SUPABASE_SERVICE_ROLE ||
+  process.env.SUPABASE_SERVICE;
 
-const SMSGLOBAL_API_KEY = process.env.SMSGLOBAL_API_KEY;
-const SMSGLOBAL_API_SECRET = process.env.SMSGLOBAL_API_SECRET;
-const SMSGLOBAL_FROM = process.env.SMSGLOBAL_FROM || process.env.SMSGLOBAL_ORIGIN || "";
+const supabaseAdmin = createClient(SUPABASE_URL, SERVICE_KEY);
 
 function s(v) {
   return String(v ?? "").trim();
 }
 
-function getBearer(req) {
-  const h = s(req.headers?.authorization || "");
-  if (!h.toLowerCase().startsWith("bearer ")) return "";
-  return s(h.slice(7));
-}
-
-function admin() {
-  if (!SUPABASE_URL || !SERVICE_KEY) {
-    throw new Error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
-  }
-  return createClient(SUPABASE_URL, SERVICE_KEY, {
-    auth: { persistSession: false, autoRefreshToken: false },
-  });
-}
-
 function digitsOnly(v) {
-  return s(v).replace(/[^\d]/g, "");
+  return s(v).replace(/[^\d+]/g, "");
 }
 
-function normalizeToDigitsOrFail(v) {
-  // accept +61..., 0417..., 61...
-  const raw = s(v);
-  if (!raw) return "";
-  let x = raw.replace(/[^\d+]/g, "");
-  if (x.startsWith("+")) x = x.slice(1);
-  if (x.startsWith("0") && x.length >= 9) x = "61" + x.slice(1);
-  return digitsOnly(x);
+// Minimal AU normalizer: 04... -> 614..., +61... -> 61..., 61... stays
+function normalizeAUTo61(raw) {
+  let v = digitsOnly(raw);
+  if (!v) return "";
+  if (v.startsWith("+")) v = v.slice(1);
+  if (v.startsWith("0")) v = "61" + v.slice(1);
+  // If already 61..., keep
+  return v;
 }
 
-function normalizeToE164(v) {
-  const raw = s(v);
-  if (!raw) return "";
-  let x = raw.replace(/[^\d+]/g, "");
-  if (x.startsWith("+")) x = x.slice(1);
-  if (x.startsWith("0") && x.length >= 9) x = "61" + x.slice(1);
-  if (x.startsWith("61")) return "+" + x;
-  if (/^\d+$/.test(x)) return "+" + x;
-  return "";
+function allowedOrigins() {
+  // Example: "gr8result,Gr8 Result"
+  const list = s(process.env.SMSGLOBAL_ALLOWED_ORIGINS || "");
+  return list
+    .split(",")
+    .map((x) => x.trim())
+    .filter(Boolean);
 }
 
-function macAuthHeader({ method, url }) {
-  const apiKey = s(SMSGLOBAL_API_KEY);
-  const secret = s(SMSGLOBAL_API_SECRET);
+function pickOrigin(requestedOrigin) {
+  const fallback = s(process.env.DEFAULT_SMS_ORIGIN || "gr8result");
+  const o = s(requestedOrigin);
+  if (!o) return fallback;
 
-  if (!apiKey || !secret) {
-    const e = new Error("Missing SMSGLOBAL_API_KEY or SMSGLOBAL_API_SECRET");
-    e.missing = ["SMSGLOBAL_API_KEY", "SMSGLOBAL_API_SECRET"].filter((k) => !process.env[k]);
-    throw e;
-  }
+  const allow = allowedOrigins();
+  if (!allow.length) return fallback; // if not configured, always use fallback
 
-  const ts = Math.floor(Date.now() / 1000);
-  const nonce = Math.floor(Math.random() * 10000000);
-
-  const u = new URL(url);
-  const host = u.hostname;
-  const port = u.port ? Number(u.port) : u.protocol === "http:" ? 80 : 443;
-  const pathPlusQuery = u.pathname + (u.search || "");
-
-  const auth =
-    ts +
-    "\n" +
-    nonce +
-    "\n" +
-    method.toUpperCase() +
-    "\n" +
-    pathPlusQuery +
-    "\n" +
-    host +
-    "\n" +
-    port +
-    "\n" +
-    "\n";
-
-  const mac = crypto.createHmac("sha256", secret).update(auth).digest("base64");
-  return `MAC id="${apiKey}", ts="${ts}", nonce="${nonce}", mac="${mac}"`;
+  // Must match exactly what SMSGlobal approved
+  if (allow.includes(o)) return o;
+  return fallback;
 }
 
-async function sendViaSmsGlobal({ to, message }) {
-  const url = "https://api.smsglobal.com/v2/sms";
-
-  const headers = {
-    "Content-Type": "application/json",
-    Authorization: macAuthHeader({ method: "POST", url }),
-  };
-
-  const body = {
-    destination: s(to),
-    message: s(message),
-  };
-
-  if (s(SMSGLOBAL_FROM)) body.origin = s(SMSGLOBAL_FROM);
-
-  const r = await fetch(url, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(body),
-  });
-
-  const text = await r.text();
-  let json = null;
-  try { json = JSON.parse(text); } catch {}
-
-  if (!r.ok) return { ok: false, status: r.status, raw: text, json };
-  return { ok: true, status: r.status, raw: text, json };
+async function getUserIdFromRequest(req) {
+  const auth = s(req.headers.authorization);
+  const token = auth.toLowerCase().startsWith("bearer ") ? auth.slice(7).trim() : "";
+  if (!token) return null;
+  const { data, error } = await supabaseAdmin.auth.getUser(token);
+  if (error || !data?.user?.id) return null;
+  return data.user.id;
 }
 
-async function ensureLeadForPhone(sb, uid, phoneE164) {
-  const phone = s(phoneE164);
-  if (!phone) return null;
-
-  const { data: existing, error: exErr } = await sb
+async function getLeadPhone(lead_id) {
+  const { data, error } = await supabaseAdmin
     .from("leads")
-    .select("id")
-    .eq("user_id", uid)
-    .or(`phone.eq.${phone},mobile.eq.${phone}`)
-    .limit(1)
+    .select("id, phone, phone_number, mobile, mobile_phone, user_id")
+    .eq("id", lead_id)
     .maybeSingle();
 
-  if (!exErr && existing?.id) return existing;
+  if (error) throw new Error(error.message);
+  if (!data) return { phone: "", lead: null };
 
-  const { data: created, error: crErr } = await sb
-    .from("leads")
-    .insert([{ user_id: uid, name: phone, phone }], { count: "exact" })
-    .select("id")
-    .maybeSingle();
+  const phone =
+    data.phone ||
+    data.phone_number ||
+    data.mobile ||
+    data.mobile_phone ||
+    "";
 
-  if (crErr) throw new Error(crErr.message || String(crErr));
-  return created || null;
-}
-
-async function logToSmsQueue(sb, { uid, lead_id, to_phone, body, provider_message_id }) {
-  const nowIso = new Date().toISOString();
-
-  // Prefer full schema
-  const fullRow = {
-    user_id: uid,
-    lead_id,
-    step_no: 1,
-    to_phone,
-    body,
-    scheduled_for: nowIso,
-    status: "sent",
-    provider_message_id: provider_message_id || null,
-    sent_at: nowIso,
-  };
-
-  const tryFull = await sb.from("sms_queue").insert([fullRow], { count: "exact" });
-  if (!tryFull.error) return { ok: true };
-
-  const msg = String(tryFull.error?.message || "").toLowerCase();
-  const looksMissingCol = msg.includes("column") && msg.includes("does not exist");
-  if (!looksMissingCol) return { ok: false, error: tryFull.error };
-
-  // Minimal fallback
-  const minRow = {
-    user_id: uid,
-    lead_id,
-    step_no: 1,
-    to_phone,
-    body,
-  };
-
-  const tryMin = await sb.from("sms_queue").insert([minRow], { count: "exact" });
-  if (!tryMin.error) return { ok: true };
-  return { ok: false, error: tryMin.error };
+  return { phone, lead: data };
 }
 
 export default async function handler(req, res) {
   try {
-    if (req.method !== "POST") {
-      res.setHeader("Allow", "POST");
-      return res.status(405).json({ ok: false, error: "Use POST" });
+    if (req.method !== "POST") return res.status(405).json({ ok: false, error: "Method not allowed" });
+
+    const userId = await getUserIdFromRequest(req);
+    if (!userId) return res.status(401).json({ ok: false, error: "Unauthorized" });
+
+    const body = req.body || {};
+    const lead_id = s(body.lead_id);
+    const message = s(body.message || body.body);
+    const rawTo = s(body.to || body.to_phone);
+
+    if (!message) return res.status(400).json({ ok: false, error: "Missing message" });
+
+    let to = rawTo;
+    let lead = null;
+
+    if (lead_id) {
+      const r = await getLeadPhone(lead_id);
+      lead = r.lead;
+
+      if (!lead) return res.status(400).json({ ok: false, error: "Lead not found" });
+      if (s(lead.user_id) && s(lead.user_id) !== s(userId)) {
+        return res.status(403).json({ ok: false, error: "Not allowed for this lead" });
+      }
+
+      to = s(r.phone);
     }
 
-    const sb = admin();
+    const to61 = normalizeAUTo61(to);
+    if (!to61) return res.status(400).json({ ok: false, error: "Missing/invalid to" });
 
-    const token = getBearer(req);
-    if (!token) return res.status(401).json({ ok: false, error: "Missing Bearer token" });
+    const origin = pickOrigin(body.origin);
 
-    const { data: userData, error: userErr } = await sb.auth.getUser(token);
-    if (userErr || !userData?.user?.id) {
-      return res.status(401).json({ ok: false, error: "Invalid session token" });
-    }
-    const uid = userData.user.id;
+    // SMSGlobal endpoint
+    const url = "https://api.smsglobal.com/v2/sms/";
+    const apiKey = s(process.env.SMSGLOBAL_API_KEY);
+    const secretKey = s(process.env.SMSGLOBAL_API_SECRET);
+    if (!apiKey || !secretKey) return res.status(500).json({ ok: false, error: "Missing SMSGlobal env keys" });
 
-    const toRaw = s(req.body?.to);
-    const message = s(req.body?.message);
+    const payload = {
+      origin,          // Sender ID (must be approved)
+      destination: to61,
+      message,
+    };
 
-    const toDigits = normalizeToDigitsOrFail(toRaw);
-    if (!toDigits || !/^\d{8,15}$/.test(toDigits)) {
-      return res.status(400).json({ ok: false, error: "Invalid destination number." });
-    }
-    if (!message) {
-      return res.status(400).json({ ok: false, error: "Message is empty." });
-    }
-
-    const toE164 = normalizeToE164(toRaw);
-    if (!toE164) {
-      return res.status(400).json({ ok: false, error: "Invalid destination number." });
-    }
-
-    const r = await sendViaSmsGlobal({ to: toDigits, message });
-
-    if (!r.ok) {
-      return res.status(500).json({
-        ok: false,
-        error: "SMS failed.",
-        detail: r.raw || "",
-        status: r.status,
-      });
-    }
-
-    const provider_id = r.json?.messages?.[0]?.id || r.json?.id || null;
-
-    // Ensure lead exists (sms_queue.lead_id is NOT NULL in your schema)
-    const lead = await ensureLeadForPhone(sb, uid, toE164);
-    if (!lead?.id) {
-      return res.status(500).json({ ok: false, error: "Failed to create/find lead for SMS logging." });
-    }
-
-    // Log into sms_queue so you see it again
-    const log = await logToSmsQueue(sb, {
-      uid,
-      lead_id: lead.id,
-      to_phone: toE164,
-      body: message,
-      provider_message_id: provider_id,
+    const { header } = buildSmsGlobalMacHeader({
+      apiKey,
+      secretKey,
+      method: "POST",
+      url,
     });
 
-    if (!log.ok) {
-      return res.status(500).json({
+    const r = await fetch(url, {
+      method: "POST",
+      headers: {
+        Authorization: header,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+
+    const txt = await r.text();
+    let parsed = null;
+    try { parsed = JSON.parse(txt); } catch {}
+
+    if (!r.ok) {
+      return res.status(r.status).json({
         ok: false,
-        error: "SMS sent but failed to log into sms_queue.",
-        detail: log.error?.message || String(log.error),
+        smsglobal_http: r.status,
+        smsglobal_body: parsed || txt,
+        used_origin: origin,
+        used_destination: to61,
       });
     }
+
+    // SMSGlobal usually returns {id: ...} or {messages:[...]} depending on API
+    const provider_id = parsed?.id ?? parsed?.messages?.[0]?.id ?? null;
 
     return res.status(200).json({
       ok: true,
-      provider: "smsglobal",
       provider_id,
-      raw: r.raw || "",
+      used_origin: origin,
+      used_destination: to61,
+      raw: parsed || txt,
     });
-  } catch (err) {
-    console.error("SMSGlobalSMSSend error:", err);
-    return res.status(500).json({
-      ok: false,
-      error: "SMS failed.",
-      detail: err?.message || String(err),
-      missing: err?.missing || null,
-    });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: e?.message || "Server error" });
   }
 }

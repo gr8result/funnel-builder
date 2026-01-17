@@ -1,0 +1,9 @@
+version: "3.8"
+services:
+  whisper_local:
+    build: ./transcribe-local
+    container_name: whisper_local
+    ports:
+      - "5055:5055"
+    environment:
+      - WHISPER_MODEL=base
