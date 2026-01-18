@@ -1,321 +1,243 @@
 // /pages/api/smsglobal/launch-sequence.js
-// FULL REPLACEMENT — queues 1–3 step SMS campaign into sms_queue
+// FULL REPLACEMENT — queues up to 3 SMS steps into sms_queue
 //
-// ✅ Derives user from Bearer token (NO trusting user_id from client)
-// ✅ Uses service role for inserts + lead lookup
-// ✅ Supports your schema where list membership is leads.list_id (lead_lists)
-// ✅ Ensures lead_id is NEVER NULL (your sms_queue schema shows lead_id NOT NULL)
-// ✅ Audience types: manual | lead | list
-// ✅ Cumulative schedule: step2 after step1, step3 after step2 (when scheduled_for exists)
+// Accepts UI payload:
+// { audience:{type:"manual|lead|list", phone?, lead_id?, list_id?}, steps:[{delay,unit,message}] }
+//
+// ✅ Extracts lead phone from many possible fields (selects *)
+// ✅ Inserts ONLY real columns for your public.sms_queue:
+//    user_id, lead_id, step_no, to_phone, body, scheduled_for
+// ✅ Returns the exact insert error if it fails
 
 import { createClient } from "@supabase/supabase-js";
 
-const SUPABASE_URL =
-  process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL;
-const SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL;
+
+const SERVICE_KEY =
+  process.env.SUPABASE_SERVICE_ROLE_KEY ||
+  process.env.SUPABASE_SERVICE_KEY ||
+  process.env.SUPABASE_SERVICE_ROLE ||
+  process.env.SUPABASE_SERVICE;
+
+function json(res, status, payload) {
+  res.status(status).json(payload);
+}
+
+function getBearer(req) {
+  const h = String(req.headers.authorization || "");
+  if (!h.toLowerCase().startsWith("bearer ")) return "";
+  return h.slice(7).trim();
+}
 
 function s(v) {
   return String(v ?? "").trim();
 }
 
-function getBearer(req) {
-  const h = s(req.headers?.authorization || "");
-  if (!h.toLowerCase().startsWith("bearer ")) return "";
-  return s(h.slice(7));
+function normalizeToMsisdnDigits(raw) {
+  let v = s(raw);
+  if (!v) return "";
+  v = v.replace(/[^\d+]/g, "");
+  if (v.startsWith("+")) v = v.slice(1);
+  if (v.startsWith("0")) v = "61" + v.slice(1);
+  v = v.replace(/[^\d]/g, "");
+  return v;
 }
 
-function admin() {
-  if (!SUPABASE_URL || !SERVICE_KEY) {
-    throw new Error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
+function addDelay(baseDate, delayValue, delayUnit) {
+  const d = new Date(baseDate);
+  const n = Number(delayValue || 0);
+  const unit = s(delayUnit || "minutes").toLowerCase();
+  if (unit.startsWith("hour")) d.setHours(d.getHours() + n);
+  else if (unit.startsWith("day")) d.setDate(d.getDate() + n);
+  else d.setMinutes(d.getMinutes() + n);
+  return d.toISOString();
+}
+
+function pickLeadPhoneDigits(leadRow) {
+  if (!leadRow || typeof leadRow !== "object") return "";
+
+  const candidates = [
+    leadRow.mobile,
+    leadRow.phone,
+    leadRow.phone_number,
+    leadRow.mobile_number,
+    leadRow.mobile_phone,
+    leadRow.cell,
+    leadRow.cell_phone,
+    leadRow.contact_number,
+    leadRow.to_phone,
+    leadRow.to,
+    leadRow.telephone,
+    leadRow.tel,
+  ]
+    .map((x) => s(x))
+    .filter(Boolean);
+
+  for (const c of candidates) {
+    const d = normalizeToMsisdnDigits(c);
+    if (d) return d;
   }
-  return createClient(SUPABASE_URL, SERVICE_KEY, {
-    auth: { persistSession: false, autoRefreshToken: false },
-  });
+  return "";
 }
 
-function normalizePhone(v) {
-  const raw = s(v);
-  if (!raw) return "";
-  let x = raw.replace(/[^\d+]/g, "");
-  if (x.startsWith("+")) x = x.slice(1);
-  if (x.startsWith("0") && x.length >= 9) x = "61" + x.slice(1);
-  if (x.startsWith("61")) return "+" + x;
-  return "+" + x.replace(/[^\d]/g, "");
-}
-
-function unitToMs(unit) {
-  const u = s(unit).toLowerCase();
-  if (u === "days") return 24 * 60 * 60 * 1000;
-  if (u === "hours") return 60 * 60 * 1000;
-  return 60 * 1000;
-}
-
-function safeInt(n, fallback = 0) {
-  const x = Number(n);
-  return Number.isFinite(x) ? x : fallback;
-}
-
-function leadIsOptedOut(lead) {
-  return Boolean(lead?.opted_out) || Boolean(lead?.sms_opt_out);
-}
-
-async function fetchLeadById(sb, uid, lead_id) {
-  const { data, error } = await sb
+async function getLeadPhoneDigits(supabaseAdmin, leadId) {
+  if (!leadId) return "";
+  const { data, error } = await supabaseAdmin
     .from("leads")
-    .select("id,user_id,phone,mobile,opted_out,sms_opt_out")
-    .eq("id", lead_id)
-    .eq("user_id", uid)
-    .maybeSingle();
-  if (error) throw new Error(error.message || String(error));
-  return data || null;
-}
-
-async function ensureLeadForPhone(sb, uid, phoneE164) {
-  const phone = s(phoneE164);
-  if (!phone) return null;
-
-  // Try match existing lead by phone/mobile
-  const { data: existing, error: exErr } = await sb
-    .from("leads")
-    .select("id,user_id,phone,mobile,opted_out,sms_opt_out")
-    .eq("user_id", uid)
-    .or(`phone.eq.${phone},mobile.eq.${phone}`)
+    .select("*")
+    .eq("id", leadId)
     .limit(1)
     .maybeSingle();
-
-  if (!exErr && existing?.id) return existing;
-
-  // Create a minimal lead so sms_queue.lead_id can be NOT NULL
-  const { data: created, error: crErr } = await sb
-    .from("leads")
-    .insert(
-      [
-        {
-          user_id: uid,
-          name: phone,
-          phone: phone,
-          mobile: null,
-        },
-      ],
-      { count: "exact" }
-    )
-    .select("id,user_id,phone,mobile,opted_out,sms_opt_out")
-    .maybeSingle();
-
-  if (crErr) throw new Error(crErr.message || String(crErr));
-  return created || null;
+  if (error || !data) return "";
+  return pickLeadPhoneDigits(data);
 }
 
-async function fetchLeadsForList(sb, uid, list_id) {
-  // Your schema supports: leads.list_id references lead_lists(id)
-  const { data: leads, error } = await sb
-    .from("leads")
-    .select("id,user_id,phone,mobile,opted_out,sms_opt_out")
-    .eq("user_id", uid)
-    .eq("list_id", list_id)
-    .limit(50000);
+async function getLeadIdsForList(supabaseAdmin, listId) {
+  if (!listId) return [];
 
-  if (!error && Array.isArray(leads)) return leads;
-
-  // Fallback (in case you later add join tables)
-  const joinCandidates = [
-    "lead_list_members",
-    "email_list_members",
-    "list_members",
-    "crm_list_members",
+  const candidates = [
+    { table: "lead_list_members", listCol: "list_id", leadCol: "lead_id" },
+    { table: "lead_list_leads", listCol: "list_id", leadCol: "lead_id" },
+    { table: "email_list_members", listCol: "list_id", leadCol: "lead_id" },
+    { table: "list_members", listCol: "list_id", leadCol: "lead_id" },
   ];
 
-  for (const joinTable of joinCandidates) {
-    const { data: members, error: memErr } = await sb
-      .from(joinTable)
-      .select("lead_id")
-      .eq("list_id", list_id)
+  for (const c of candidates) {
+    const { data, error } = await supabaseAdmin
+      .from(c.table)
+      .select(c.leadCol)
+      .eq(c.listCol, listId)
       .limit(50000);
 
-    if (memErr || !Array.isArray(members)) continue;
-
-    const ids = members.map((m) => m.lead_id).filter(Boolean);
-    if (!ids.length) return [];
-
-    const { data: leads2, error: leadErr } = await sb
-      .from("leads")
-      .select("id,user_id,phone,mobile,opted_out,sms_opt_out")
-      .in("id", ids)
-      .eq("user_id", uid)
-      .limit(50000);
-
-    if (leadErr) throw new Error(leadErr.message || String(leadErr));
-    return leads2 || [];
+    if (!error && Array.isArray(data) && data.length) {
+      const ids = data.map((r) => r?.[c.leadCol]).filter(Boolean);
+      if (ids.length) return ids;
+    }
   }
 
   return [];
 }
 
-async function insertQueueRows(sb, rows) {
-  // Try FULL schema first
-  const full = rows.map((r) => ({
-    user_id: r.user_id,
-    lead_id: r.lead_id,
-    step_no: r.step_no,
-    to_phone: r.to_phone,
-    body: r.body,
-    scheduled_for: r.scheduled_for,
-    status: r.status,
-  }));
+async function getPhonesForListDigits(supabaseAdmin, listId) {
+  const leadIds = await getLeadIdsForList(supabaseAdmin, listId);
+  if (!leadIds.length) return [];
 
-  const tryFull = await sb.from("sms_queue").insert(full, { count: "exact" });
-  if (!tryFull.error) {
-    return { ok: true, count: tryFull.count ?? full.length, used: "full" };
+  const out = [];
+  const chunk = 400;
+
+  for (let i = 0; i < leadIds.length; i += chunk) {
+    const slice = leadIds.slice(i, i + chunk);
+    const { data, error } = await supabaseAdmin.from("leads").select("*").in("id", slice);
+    if (error || !Array.isArray(data)) continue;
+
+    for (const row of data) {
+      const d = pickLeadPhoneDigits(row);
+      if (d) out.push({ lead_id: row?.id || null, to_phone: d });
+    }
   }
 
-  const msg = String(tryFull.error?.message || "").toLowerCase();
-  const looksMissingCol = msg.includes("column") && msg.includes("does not exist");
-
-  if (!looksMissingCol) return { ok: false, error: tryFull.error };
-
-  // Minimal fallback
-  const minimal = rows.map((r) => ({
-    user_id: r.user_id,
-    lead_id: r.lead_id,
-    step_no: r.step_no,
-    to_phone: r.to_phone,
-    body: r.body,
-  }));
-
-  const tryMin = await sb.from("sms_queue").insert(minimal, { count: "exact" });
-  if (!tryMin.error) {
-    return { ok: true, count: tryMin.count ?? minimal.length, used: "minimal" };
-  }
-
-  return { ok: false, error: tryMin.error };
+  return out;
 }
 
 export default async function handler(req, res) {
-  if (req.method !== "POST") {
-    res.setHeader("Allow", ["POST"]);
-    return res.status(405).json({ ok: false, error: "POST only" });
-  }
-
   try {
-    const sb = admin();
-
-    const token = getBearer(req);
-    if (!token) return res.status(401).json({ ok: false, error: "Missing Bearer token" });
-
-    const { data: userData, error: userErr } = await sb.auth.getUser(token);
-    if (userErr || !userData?.user?.id) {
-      return res.status(401).json({ ok: false, error: "Invalid session token" });
+    if (req.method !== "POST") {
+      res.setHeader("Allow", "POST");
+      return json(res, 405, { ok: false, error: "Method not allowed" });
     }
-    const uid = userData.user.id;
+
+    if (!SUPABASE_URL || !SERVICE_KEY) {
+      return json(res, 500, { ok: false, error: "Supabase server env missing" });
+    }
+
+    const supabaseAdmin = createClient(SUPABASE_URL, SERVICE_KEY);
+
+    const bearer = getBearer(req);
+    if (!bearer) return json(res, 401, { ok: false, error: "Missing Bearer token" });
+
+    const { data: u, error: uErr } = await supabaseAdmin.auth.getUser(bearer);
+    if (uErr || !u?.user?.id) return json(res, 401, { ok: false, error: "Invalid Bearer token" });
+
+    const userId = u.user.id;
 
     const audience = req.body?.audience || {};
-    const stepsRaw = Array.isArray(req.body?.steps) ? req.body.steps : [];
+    const audienceType = s(audience.type).toLowerCase();
 
-    const steps = stepsRaw
-      .map((x) => ({
-        delay: Math.max(0, safeInt(x?.delay, 0)),
-        unit: s(x?.unit || "minutes") || "minutes",
-        message: s(x?.message),
+    const stepsIn = Array.isArray(req.body?.steps) ? req.body.steps : [];
+    const steps = stepsIn
+      .map((st) => ({
+        delay_value: Number(st.delay || 0),
+        delay_unit: s(st.unit || "minutes") || "minutes",
+        body: s(st.message),
       }))
-      .filter((x) => x.message)
+      .filter((x) => x.body)
       .slice(0, 3);
 
-    if (!steps.length) return res.status(400).json({ ok: false, error: "No steps provided" });
-    if (!audience?.type) return res.status(400).json({ ok: false, error: "Missing audience.type" });
+    if (!steps.length) return json(res, 400, { ok: false, error: "No steps provided" });
 
-    // Resolve recipients
-    let recipients = []; // { lead_id, user_id, to_phone }
-    if (audience.type === "manual") {
-      const to = normalizePhone(audience.phone);
-      if (!to) return res.status(400).json({ ok: false, error: "Missing manual phone" });
-
-      const lead = await ensureLeadForPhone(sb, uid, to);
-      if (!lead) return res.status(500).json({ ok: false, error: "Failed to create/find lead for manual phone" });
-      if (leadIsOptedOut(lead)) return res.status(200).json({ ok: true, queued: 0, skipped_opt_out: 1 });
-
-      recipients = [{ lead_id: lead.id, user_id: uid, to_phone: to }];
-    } else if (audience.type === "lead") {
+    // Recipients
+    let recipients = []; // [{lead_id,to_phone}]
+    if (audienceType === "manual") {
+      const d = normalizeToMsisdnDigits(audience.phone);
+      if (!d) return json(res, 400, { ok: false, error: "Missing phone for manual audience" });
+      recipients = [{ lead_id: null, to_phone: d }];
+    } else if (audienceType === "lead") {
       const leadId = s(audience.lead_id);
-      if (!leadId) return res.status(400).json({ ok: false, error: "Missing lead_id" });
-
-      const lead = await fetchLeadById(sb, uid, leadId);
-      if (!lead) return res.status(404).json({ ok: false, error: "Lead not found for this user" });
-      if (leadIsOptedOut(lead)) return res.status(200).json({ ok: true, queued: 0, skipped_opt_out: 1 });
-
-      const to = normalizePhone(lead.mobile || lead.phone);
-      if (!to) return res.status(400).json({ ok: false, error: "Lead has no phone/mobile" });
-
-      recipients = [{ lead_id: lead.id, user_id: uid, to_phone: to }];
-    } else if (audience.type === "list") {
+      if (!leadId) return json(res, 400, { ok: false, error: "Missing lead_id" });
+      const d = await getLeadPhoneDigits(supabaseAdmin, leadId);
+      if (!d) return json(res, 400, { ok: false, error: "Selected lead has no phone/mobile" });
+      recipients = [{ lead_id: leadId, to_phone: d }];
+    } else if (audienceType === "list") {
       const listId = s(audience.list_id);
-      if (!listId) return res.status(400).json({ ok: false, error: "Missing list_id" });
-
-      const leads = await fetchLeadsForList(sb, uid, listId);
-      const okLeads = (leads || []).filter((l) => !leadIsOptedOut(l));
-
-      recipients = okLeads
-        .map((l) => {
-          const to = normalizePhone(l.mobile || l.phone);
-          if (!to) return null;
-          return { lead_id: l.id, user_id: uid, to_phone: to };
-        })
-        .filter(Boolean);
+      if (!listId) return json(res, 400, { ok: false, error: "Missing list_id" });
+      const phones = await getPhonesForListDigits(supabaseAdmin, listId);
+      if (!phones.length)
+        return json(res, 400, { ok: false, error: "No leads with phones found for this list" });
+      recipients = phones;
     } else {
-      return res.status(400).json({ ok: false, error: `Unknown audience.type: ${audience.type}` });
+      return json(res, 400, { ok: false, error: "Invalid audience.type" });
     }
 
-    if (!recipients.length) {
-      return res.status(200).json({ ok: true, queued: 0, message: "No recipients (opted out / missing numbers)" });
-    }
-
-    // Cumulative schedule
-    const now = Date.now();
-    let cumulativeMs = 0;
-    const scheduledFors = steps.map((st) => {
-      cumulativeMs += st.delay * unitToMs(st.unit);
-      return new Date(now + cumulativeMs).toISOString();
-    });
-
+    // Build queue rows (delay is since previous step)
+    const now = new Date();
     const rows = [];
+
     for (const r of recipients) {
+      let cursor = now;
       for (let i = 0; i < steps.length; i++) {
+        const st = steps[i];
+        const scheduled_for = addDelay(cursor, st.delay_value, st.delay_unit);
+        cursor = new Date(scheduled_for);
+
+        // IMPORTANT: insert ONLY real columns (NO origin)
         rows.push({
-          user_id: uid,
+          user_id: userId,
           lead_id: r.lead_id,
           step_no: i + 1,
           to_phone: r.to_phone,
-          body: steps[i].message,
-          scheduled_for: scheduledFors[i],
-          status: "queued",
+          body: st.body,
+          scheduled_for,
         });
       }
     }
 
-    const ins = await insertQueueRows(sb, rows);
-    if (!ins.ok) {
-      return res.status(500).json({
+    const { data, error } = await supabaseAdmin.from("sms_queue").insert(rows).select("*");
+
+    if (error) {
+      return json(res, 500, {
         ok: false,
-        error: "Failed to queue campaign",
-        detail: ins.error?.message || String(ins.error),
+        error: "Queue insert failed",
+        detail: String(error.message || error),
       });
     }
 
-    return res.status(200).json({
+    return json(res, 200, {
       ok: true,
-      queued: ins.count,
+      queued: Array.isArray(data) ? data.length : rows.length,
       recipients: recipients.length,
       steps: steps.length,
-      schema_used: ins.used,
-      warning:
-        ins.used === "minimal"
-          ? "sms_queue is missing scheduled_for/status columns. It WILL queue, but spacing requires scheduled_for."
-          : null,
     });
   } catch (e) {
-    return res.status(500).json({
-      ok: false,
-      error: "Server error",
-      detail: e?.message || String(e),
-    });
+    return json(res, 500, { ok: false, error: String(e?.message || e) });
   }
 }

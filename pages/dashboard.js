@@ -1,11 +1,11 @@
-// /pages/dashboard.js 
+// /pages/dashboard.js
 // Dashboard with green banner + full colour hover effect + fixed width 1320px
 
 import Link from "next/link";
 import ICONS from "../components/iconMap";
 
-// Simple network / circle style icon for Communities (Option 3)
-const CommunitiesIcon = ({ size = 22, color = "#fff" }) => (
+// Simple network / circle style icon for Communities
+const CommunitiesIcon = ({ size = 48, color = "#fff" }) => (
   <svg
     width={size}
     height={size}
@@ -83,7 +83,6 @@ const CORE = [
   },
 ];
 
-// ⭐ MODULES — reordered so Email is #1 and CRM is #2
 const MODULES = [
   {
     title: "Email marketing",
@@ -182,8 +181,8 @@ export default function Dashboard() {
   return (
     <div className="wrap">
       <div className="banner">
-        <span className="banner-icon">{ICONS.dashboard({ size: 24 })}</span>
-        <div>
+        <span className="banner-icon">{ICONS.dashboard({ size: 48 })}</span>
+        <div className="banner-text">
           <h1 className="banner-title">Dashboard</h1>
           <p className="banner-desc">Quick access to all modules and tools.</p>
         </div>
@@ -200,7 +199,7 @@ export default function Dashboard() {
                 "--hover-color": item.color,
               }}
             >
-              <span className="icon">{item.icon({ size: 22 })}</span>
+              <span className="icon">{item.icon({ size: 48 })}</span>
               <div>
                 <h3>{item.title}</h3>
                 <p>{item.desc}</p>
@@ -221,7 +220,7 @@ export default function Dashboard() {
                 "--hover-color": item.color,
               }}
             >
-              <span className="icon">{item.icon({ size: 22 })}</span>
+              <span className="icon">{item.icon({ size: 48 })}</span>
               <div>
                 <h3>{item.title}</h3>
                 <p>{item.desc}</p>
@@ -241,29 +240,47 @@ export default function Dashboard() {
           flex-direction: column;
           align-items: center;
         }
+
         .banner {
           display: flex;
           align-items: center;
-          gap: 12px;
+          gap: 14px;
           background: #22c55e;
-          padding: 14px 18px;
+          padding: 18px 22px;
           border-radius: 12px;
           margin-bottom: 26px;
           width: 100%;
           max-width: 1320px;
         }
+
         .banner-icon {
           background: rgba(255, 255, 255, 0.15);
           border-radius: 50%;
-          padding: 6px;
+          padding: 8px;
         }
+
+        .banner-title {
+          font-size: 48px;
+          font-weight: 700;
+          line-height: 1.1;
+          margin: 0;
+        }
+
+        .banner-desc {
+          font-size: 16px;
+          font-weight: 500;
+          margin: 4px 0 0;
+          opacity: 0.9;
+        }
+
         h2 {
           width: 100%;
           max-width: 1320px;
-          font-size: 18px;
+          font-size: 24px;
           margin: 22px 0 12px;
-          font-weight: 700;
+          font-weight: 600;
         }
+
         .grid {
           display: grid;
           grid-template-columns: repeat(3, 1fr);
@@ -271,6 +288,7 @@ export default function Dashboard() {
           width: 100%;
           max-width: 1320px;
         }
+
         .card {
           display: flex;
           align-items: flex-start;
@@ -281,6 +299,7 @@ export default function Dashboard() {
           background: #0c121a;
           transition: all 0.25s ease;
         }
+
         .card:hover {
           background: var(--hover-color);
           color: #000;

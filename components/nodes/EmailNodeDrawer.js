@@ -1,6 +1,8 @@
 // /components/nodes/EmailNodeDrawer.js
-// ✅ GR8 RESULT – Email Node Drawer (with previews)
-// Loads user's saved emails, attaches preview URL for automation nodes
+// FULL REPLACEMENT — stores HTML path + preview + bucket so engine can send the right email
+// ✅ Saves: emailId, emailName, emailPreviewUrl, htmlPath, bucket
+// ✅ htmlPath is always: `${userId}/finished-emails/${emailId}.html`
+// ✅ Preview is still PNG/JPG/WEBP public URL guess
 
 import { useEffect, useState } from "react";
 import { supabase } from "../../utils/supabase-client";
@@ -10,21 +12,20 @@ export default function EmailNodeDrawer({ node, onSave, onClose, userId }) {
   const router = useRouter();
 
   const [label, setLabel] = useState(node?.data?.label || "Email Step");
+
   const [emailId, setEmailId] = useState(node?.data?.emailId || "");
   const [emailName, setEmailName] = useState(node?.data?.emailName || "");
-  const [emailPreviewUrl, setEmailPreviewUrl] = useState(
-    node?.data?.emailPreviewUrl || ""
-  );
+  const [emailPreviewUrl, setEmailPreviewUrl] = useState(node?.data?.emailPreviewUrl || "");
+
+  // ✅ NEW: this is what the engine needs
+  const [bucket, setBucket] = useState(node?.data?.bucket || "email-user-assets");
+  const [htmlPath, setHtmlPath] = useState(node?.data?.htmlPath || "");
 
   const [emails, setEmails] = useState([]);
   const [loading, setLoading] = useState(true);
 
-  // ---------------------------------------------
-  // LOAD USER'S SAVED EMAILS FROM SUPABASE STORAGE
-  // ---------------------------------------------
   useEffect(() => {
     if (!userId) {
-      // No user yet – nothing to load
       setLoading(false);
       return;
     }
@@ -42,27 +43,19 @@ export default function EmailNodeDrawer({ node, onSave, onClose, userId }) {
       .list(folder);
 
     if (!error && data) {
-      // Keep only .html files and attach a preview URL guess
       const emailList = data
         .filter((f) => f.name.toLowerCase().endsWith(".html"))
         .map((f) => {
           const id = f.name.replace(/\.html$/i, "");
           const name = id;
 
-          // Try PNG, then JPG, then WEBP as possible thumbnail names
           const pngPath = `${folder}${id}.png`;
           const jpgPath = `${folder}${id}.jpg`;
           const webpPath = `${folder}${id}.webp`;
 
-          const { data: pngUrlData } = supabase.storage
-            .from("email-user-assets")
-            .getPublicUrl(pngPath);
-          const { data: jpgUrlData } = supabase.storage
-            .from("email-user-assets")
-            .getPublicUrl(jpgPath);
-          const { data: webpUrlData } = supabase.storage
-            .from("email-user-assets")
-            .getPublicUrl(webpPath);
+          const { data: pngUrlData } = supabase.storage.from("email-user-assets").getPublicUrl(pngPath);
+          const { data: jpgUrlData } = supabase.storage.from("email-user-assets").getPublicUrl(jpgPath);
+          const { data: webpUrlData } = supabase.storage.from("email-user-assets").getPublicUrl(webpPath);
 
           const previewUrl =
             pngUrlData?.publicUrl ||
@@ -70,43 +63,40 @@ export default function EmailNodeDrawer({ node, onSave, onClose, userId }) {
             webpUrlData?.publicUrl ||
             "";
 
-          return {
-            id,
-            name,
-            previewUrl,
-          };
+          return { id, name, previewUrl };
         });
 
       setEmails(emailList);
 
-      // If the node already had an email selected, hydrate its preview url
-      if (emailId && !emailPreviewUrl) {
+      // hydrate existing selection
+      if (emailId) {
         const existing = emailList.find((e) => e.id === emailId);
-        if (existing?.previewUrl) {
-          setEmailPreviewUrl(existing.previewUrl);
-        }
+        if (existing?.previewUrl && !emailPreviewUrl) setEmailPreviewUrl(existing.previewUrl);
+
+        // ✅ ensure htmlPath is correct if missing
+        const hp = `${userId}/finished-emails/${emailId}.html`;
+        if (!htmlPath) setHtmlPath(hp);
       }
     }
 
     setLoading(false);
   }
 
-  // ---------------------------------------------
-  // SAVE NODE SETTINGS
-  // ---------------------------------------------
   const saveAndClose = () => {
     onSave({
       ...node.data,
       label,
       emailId,
       emailName,
-      emailPreviewUrl, // 👈 this is what the EmailNode uses to show the thumbnail
+      emailPreviewUrl,
+
+      // ✅ CRITICAL FOR ENGINE
+      bucket: bucket || "email-user-assets",
+      htmlPath,
+      storagePath: htmlPath, // (extra compatibility, engine checks storagePath too)
     });
   };
 
-  // ---------------------------------------------
-  // CREATE NEW EMAIL
-  // ---------------------------------------------
   const createNewEmail = () => {
     router.push("/modules/email/templates/select?fromNode=1");
   };
@@ -116,13 +106,10 @@ export default function EmailNodeDrawer({ node, onSave, onClose, userId }) {
       <div style={s.drawer}>
         <div style={s.header}>
           <h2>Edit Email Node</h2>
-          <button onClick={onClose} style={s.close}>
-            ×
-          </button>
+          <button onClick={onClose} style={s.close}>×</button>
         </div>
 
         <div style={s.body}>
-          {/* Label */}
           <label style={s.label}>Node Label</label>
           <input
             value={label}
@@ -131,7 +118,6 @@ export default function EmailNodeDrawer({ node, onSave, onClose, userId }) {
             placeholder="e.g. Send Welcome Email"
           />
 
-          {/* Saved Email Selector */}
           <label style={s.label}>Select Email</label>
           {loading ? (
             <div style={{ opacity: 0.7 }}>Loading emails…</div>
@@ -146,6 +132,13 @@ export default function EmailNodeDrawer({ node, onSave, onClose, userId }) {
 
                 setEmailName(chosen?.name || id || "");
                 setEmailPreviewUrl(chosen?.previewUrl || "");
+
+                // ✅ CRITICAL: store html path for engine
+                const hp = id ? `${userId}/finished-emails/${id}.html` : "";
+                setHtmlPath(hp);
+
+                // keep bucket stable
+                setBucket("email-user-assets");
               }}
               style={s.input}
             >
@@ -161,15 +154,17 @@ export default function EmailNodeDrawer({ node, onSave, onClose, userId }) {
           <button style={s.createBtn} onClick={createNewEmail}>
             ➕ Create New Email
           </button>
+
+          {/* Tiny debug line (optional but helpful) */}
+          <div style={{ marginTop: 12, fontSize: 12, opacity: 0.8 }}>
+            <div><b>Bucket:</b> {bucket}</div>
+            <div style={{ wordBreak: "break-all" }}><b>HTML:</b> {htmlPath || "-"}</div>
+          </div>
         </div>
 
         <div style={s.footer}>
-          <button onClick={saveAndClose} style={s.saveBtn}>
-            💾 Save
-          </button>
-          <button onClick={onClose} style={s.cancelBtn}>
-            Cancel
-          </button>
+          <button onClick={saveAndClose} style={s.saveBtn}>💾 Save</button>
+          <button onClick={onClose} style={s.cancelBtn}>Cancel</button>
         </div>
       </div>
     </div>

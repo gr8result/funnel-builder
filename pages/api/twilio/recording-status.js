@@ -1,79 +1,116 @@
 // /pages/api/twilio/recording-status.js
-// Receives Twilio recordingStatusCallback and stores it into Lead Notes.
+// FULL REPLACEMENT
+//
+// ✅ Receives Twilio recordingStatusCallback (alt webhook)
+// ✅ DOES NOT write into lead notes
+// ✅ Stores into public.crm_calls (best-effort)
 //
 // Requires env:
-// SUPABASE_URL or NEXT_PUBLIC_SUPABASE_URL
-// SUPABASE_SERVICE_ROLE_KEY
-//
-// Notes storage strategy:
-// 1) Try insert into "lead_notes" table (lead_id, note, created_at)
-// 2) Fallback: append to leads.notes (json array) if it exists
+//  SUPABASE_URL or NEXT_PUBLIC_SUPABASE_URL
+//  SUPABASE_SERVICE_ROLE_KEY
 
 import { createClient } from "@supabase/supabase-js";
 
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL;
 const SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-const supabaseAdmin = createClient(SUPABASE_URL, SERVICE_KEY, {
-  auth: { persistSession: false, autoRefreshToken: false },
-});
+function s(v) {
+  return String(v ?? "").trim();
+}
+
+function nowISO() {
+  try {
+    return new Date().toISOString();
+  } catch {
+    return null;
+  }
+}
 
 export default async function handler(req, res) {
+  // Always return 200 to Twilio so it doesn't retry forever
   try {
-    // Twilio sends x-www-form-urlencoded by default
+    if (!SUPABASE_URL || !SERVICE_KEY) {
+      return res.status(200).json({ ok: false, error: "Missing Supabase env" });
+    }
+
+    const supabase = createClient(SUPABASE_URL, SERVICE_KEY, {
+      auth: { persistSession: false, autoRefreshToken: false },
+    });
+
     const body = req.body || {};
-    const leadId = String(req.query?.leadId || body?.leadId || "").trim();
 
-    const recordingSid = body?.RecordingSid;
-    const callSid = body?.CallSid;
-    const status = body?.RecordingStatus;
-    const recordingUrl = body?.RecordingUrl; // base URL (no extension)
+    const leadId = s(req.query?.leadId || req.query?.lead_id || body?.leadId || body?.lead_id);
+    const userId = s(req.query?.user_id || body?.user_id);
+    const accountId = s(req.query?.account_id || body?.account_id);
 
-    // best playable link:
-    const mp3Url = recordingUrl ? `${recordingUrl}.mp3` : "";
+    const recordingSid = s(body.RecordingSid || body.recordingSid);
+    const callSid = s(body.CallSid || body.callSid);
+    const status = s(body.RecordingStatus || body.recordingStatus);
+    const recordingUrlBase = s(body.RecordingUrl || body.recordingUrl);
+    const duration = body.RecordingDuration ?? body.recordingDuration;
 
-    const line = `[${new Date().toISOString()}] Call recorded`
-      + (status ? ` (${status})` : "")
-      + (callSid ? ` • CallSid: ${callSid}` : "")
-      + (recordingSid ? ` • RecordingSid: ${recordingSid}` : "")
-      + (mp3Url ? ` • ${mp3Url}` : "");
+    const from = s(body.From || body.from);
+    const to = s(body.To || body.to);
+    const direction = s(body.Direction || body.direction) || null;
 
-    if (!leadId) {
-      // still return 200 to Twilio (don't retry forever)
-      return res.status(200).json({ ok: true, skipped: true, reason: "No leadId provided" });
+    if (!recordingSid && !callSid) {
+      return res.status(200).json({ ok: true, skipped: true, reason: "No RecordingSid/CallSid" });
     }
 
-    // 1) Try lead_notes table first
-    const { error: insErr } = await supabaseAdmin
-      .from("lead_notes")
-      .insert([{ lead_id: leadId, note: line }]);
+    const playableRecordingUrl = recordingSid
+      ? `/api/twilio/recording?sid=${encodeURIComponent(recordingSid)}`
+      : recordingUrlBase
+      ? `${recordingUrlBase}.mp3`
+      : null;
 
-    if (!insErr) {
-      return res.status(200).json({ ok: true, stored: "lead_notes" });
+    const payload = {
+      created_at: nowISO(),
+      user_id: userId || null,
+      account_id: accountId || null,
+      lead_id: leadId || null,
+      direction: direction || null,
+      from_number: from || null,
+      to_number: to || null,
+      status: status || null,
+      recording_url: playableRecordingUrl,
+      recording_duration:
+        duration == null || duration === ""
+          ? null
+          : Number.isFinite(Number(duration))
+          ? Number(duration)
+          : null,
+      twilio_sid: callSid || null,
+      raw_payload: body || null,
+      unread: true,
+    };
+
+    if (payload.twilio_sid) {
+      const { data: existing, error: selErr } = await supabase
+        .from("crm_calls")
+        .select("id, twilio_sid")
+        .eq("twilio_sid", payload.twilio_sid)
+        .maybeSingle();
+
+      if (!selErr && existing?.id) {
+        const { error: updErr } = await supabase
+          .from("crm_calls")
+          .update(payload)
+          .eq("id", existing.id);
+
+        if (updErr) {
+          return res.status(200).json({ ok: true, stored: false, error: updErr.message });
+        }
+        return res.status(200).json({ ok: true, stored: "crm_calls:update" });
+      }
     }
 
-    // 2) Fallback to leads.notes as json array
-    const { data: leadRow, error: selErr } = await supabaseAdmin
-      .from("leads")
-      .select("id, notes")
-      .eq("id", leadId)
-      .single();
-
-    if (selErr) {
-      return res.status(200).json({ ok: true, stored: "none", error: selErr.message, insertError: insErr.message });
+    const { error: insErr } = await supabase.from("crm_calls").insert(payload);
+    if (insErr) {
+      return res.status(200).json({ ok: true, stored: false, error: insErr.message });
     }
 
-    const existing = Array.isArray(leadRow?.notes) ? leadRow.notes : [];
-    const next = [...existing, line];
-
-    const { error: updErr } = await supabaseAdmin
-      .from("leads")
-      .update({ notes: next })
-      .eq("id", leadId);
-
-    return res.status(200).json({ ok: true, stored: updErr ? "none" : "leads.notes", error: updErr?.message || null, insertError: insErr.message });
+    return res.status(200).json({ ok: true, stored: "crm_calls:insert" });
   } catch (e) {
-    // Always 200 to Twilio so it doesn't retry endlessly
     return res.status(200).json({ ok: false, error: e?.message || String(e) });
   }
 }

@@ -6,6 +6,7 @@
 // ✅ Members load + click opens lead modal callback
 // ✅ Keeps your banner/layout (only Members modal internals touched)
 // ✅ NEW: If import returns 0, shows server message + debug so we can see EXACTLY why
+// ✅ NEW: DELETE member button per row (calls /api/automation/members/remove-person)
 
 import { useEffect, useMemo, useState, useCallback, useRef } from "react";
 import Head from "next/head";
@@ -952,6 +953,8 @@ function FlowMembersModal({
   const [count, setCount] = useState(0);
   const [busy, setBusy] = useState(false);
 
+  const [busyDeleteId, setBusyDeleteId] = useState(null);
+
   const [toast, setToast] = useState("");
   const [lastDebug, setLastDebug] = useState(null);
 
@@ -1045,7 +1048,6 @@ function FlowMembersModal({
         throw new Error((j?.error || `HTTP ${res.status}`) + extra);
       }
 
-      // ✅ Always store debug (even on success) so we can see why it imported 0
       setLastDebug(j?.debug || null);
 
       const inserted = Number(j.inserted ?? j.imported ?? j.inserted_count ?? 0);
@@ -1053,7 +1055,6 @@ function FlowMembersModal({
       const reactivated = Number(j.reactivated ?? 0);
       const total = Number(j.total ?? (inserted + existing) ?? 0);
 
-      // Show message + a compact debug summary when it imports 0
       if (inserted === 0 && existing === 0 && reactivated === 0) {
         const win = j?.debug?.memberWinning;
         const keys = j?.debug?.memberRowKeys;
@@ -1063,9 +1064,13 @@ function FlowMembersModal({
         const summary = [
           `Imported: 0 • Reactivated: 0 • Total: 0`,
           j?.message ? `Message: ${j.message}` : null,
-          win ? `Member source: ${win.table} via ${win.fk} (rows: ${win.rows})` : null,
+          win
+            ? `Member source: ${win.table} via ${win.fk} (rows: ${win.rows})`
+            : null,
           keys?.length ? `Member row keys: ${keys.join(", ")}` : null,
-          extract ? `Extract: leadIds=${extract.directLeadIds} emails=${extract.emails}` : null,
+          extract
+            ? `Extract: leadIds=${extract.directLeadIds} emails=${extract.emails}`
+            : null,
           leadCol ? `Leads email column: ${leadCol}` : null,
           `↓ Open DEBUG panel below`,
         ]
@@ -1086,6 +1091,50 @@ function FlowMembersModal({
       setBusy(false);
     }
   }, [flowId, selectedListId, getToken, loadMembers]);
+
+  const deleteMember = useCallback(
+    async (leadId) => {
+      if (!flowId || !leadId) return;
+
+      const yes = window.confirm(
+        "Remove this member from the flow?\n\nThis only removes them from this flow (it does NOT delete the lead)."
+      );
+      if (!yes) return;
+
+      setBusyDeleteId(String(leadId));
+      try {
+        const token = await getToken();
+        if (!token) throw new Error("Missing session token.");
+
+        const res = await fetch("/api/automation/members/remove-person", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({ flow_id: flowId, lead_id: String(leadId) }),
+        });
+
+        const j = await res.json().catch(() => null);
+        if (!res.ok || !j?.ok) {
+          throw new Error(j?.error || `HTTP ${res.status}`);
+        }
+
+        setMembers((prev) =>
+          (prev || []).filter(
+            (m) => String(m?.id || m?.lead_id) !== String(leadId)
+          )
+        );
+        setCount((c) => Math.max(0, Number(c || 0) - 1));
+        toastMsg("Member removed from flow.");
+      } catch (e) {
+        toastMsg(`Delete failed: ${e?.message || String(e)}`);
+      } finally {
+        setBusyDeleteId(null);
+      }
+    },
+    [flowId, getToken]
+  );
 
   useEffect(() => {
     if (!isOpen) return;
@@ -1254,38 +1303,82 @@ function FlowMembersModal({
                   No members yet.
                 </div>
               ) : (
-                members.map((m) => (
-                  <button
-                    key={m.id || `${m.lead_id}-${m.created_at || ""}`}
-                    onClick={() => onOpenLead && onOpenLead(m)}
-                    style={{
-                      width: "100%",
-                      textAlign: "left",
-                      background: "transparent",
-                      border: "none",
-                      borderTop: "1px solid rgba(148,163,184,0.10)",
-                      padding: "10px 12px",
-                      cursor: "pointer",
-                      color: "#e5e7eb",
-                    }}
-                    onMouseEnter={(e) =>
-                      (e.currentTarget.style.background =
-                        "rgba(148,163,184,0.06)")
-                    }
-                    onMouseLeave={(e) =>
-                      (e.currentTarget.style.background = "transparent")
-                    }
-                  >
-                    <div style={{ fontWeight: 700 }}>
-                      {m.name || m.email || m.phone || m.lead_id}
+                members.map((m) => {
+                  const leadId = m?.id || m?.lead_id;
+                  return (
+                    <div
+                      key={leadId || `${m.lead_id}-${m.created_at || ""}`}
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                        gap: 12,
+                        borderTop: "1px solid rgba(148,163,184,0.10)",
+                        padding: "10px 12px",
+                      }}
+                    >
+                      <button
+                        onClick={() => onOpenLead && onOpenLead(m)}
+                        style={{
+                          flex: 1,
+                          textAlign: "left",
+                          background: "transparent",
+                          border: "none",
+                          cursor: "pointer",
+                          color: "#e5e7eb",
+                          padding: 0,
+                        }}
+                        onMouseEnter={(e) =>
+                          (e.currentTarget.style.opacity = 0.95)
+                        }
+                        onMouseLeave={(e) =>
+                          (e.currentTarget.style.opacity = 1)
+                        }
+                      >
+                        <div style={{ fontWeight: 700 }}>
+                          {m.name || m.email || m.phone || m.lead_id}
+                        </div>
+                        <div style={{ fontSize: 16, color: "#94a3b8" }}>
+                          {m.email ? `Email: ${m.email} • ` : ""}
+                          {m.phone ? `Phone: ${m.phone} • ` : ""}
+                          Status: {m.status || "active"}
+                        </div>
+                      </button>
+
+                      <button
+                        onClick={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          deleteMember(leadId);
+                        }}
+                        disabled={!leadId || busyDeleteId === String(leadId)}
+                        style={{
+                          background:
+                            busyDeleteId === String(leadId)
+                              ? "rgba(239,68,68,0.35)"
+                              : "rgba(239,68,68,0.14)",
+                          border: "1px solid rgba(239,68,68,0.55)",
+                          color: "#fecaca",
+                          padding: "8px 12px",
+                          borderRadius: 999,
+                          fontWeight: 900,
+                          cursor:
+                            busyDeleteId === String(leadId)
+                              ? "not-allowed"
+                              : "pointer",
+                          opacity: leadId ? 1 : 0.5,
+                          minWidth: 92,
+                          textAlign: "center",
+                        }}
+                        title="Remove member from this flow"
+                      >
+                        {busyDeleteId === String(leadId)
+                          ? "Deleting…"
+                          : "Delete"}
+                      </button>
                     </div>
-                    <div style={{ fontSize: 16, color: "#94a3b8" }}>
-                      {m.email ? `Email: ${m.email} • ` : ""}
-                      {m.phone ? `Phone: ${m.phone} • ` : ""}
-                      Status: {m.status || "active"}
-                    </div>
-                  </button>
-                ))
+                  );
+                })
               )}
             </div>
           </div>
@@ -1317,7 +1410,9 @@ function FlowMembersModal({
                 padding: 10,
               }}
             >
-              <summary style={{ cursor: "pointer", fontWeight: 900, color: "#93c5fd" }}>
+              <summary
+                style={{ cursor: "pointer", fontWeight: 900, color: "#93c5fd" }}
+              >
                 DEBUG (click to open)
               </summary>
               <pre
