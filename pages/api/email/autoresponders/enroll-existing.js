@@ -58,7 +58,9 @@ export default async function handler(req, res) {
   }
 
   if (!SUPABASE_URL || !SERVICE_KEY) {
-    return res.status(500).json({ ok: false, error: "Missing Supabase env keys" });
+    return res
+      .status(500)
+      .json({ ok: false, error: "Missing Supabase env keys" });
   }
 
   const user = await getUserFromBearer(req);
@@ -95,7 +97,12 @@ export default async function handler(req, res) {
 
   // Optional: only enroll if active
   if (ar.is_active === false) {
-    return res.status(200).json({ ok: true, added: 0, skipped: 0, note: "Autoresponder is not active." });
+    return res.status(200).json({
+      ok: true,
+      added: 0,
+      skipped: 0,
+      note: "Autoresponder is not active.",
+    });
   }
 
   // 2) Verify list belongs to user (multi-tenant safety)
@@ -130,7 +137,12 @@ export default async function handler(req, res) {
     .filter((m) => isEmail(m.to_email));
 
   if (!cleaned.length) {
-    return res.status(200).json({ ok: true, added: 0, skipped: 0, note: "No eligible emails in email_list_members." });
+    return res.status(200).json({
+      ok: true,
+      added: 0,
+      skipped: 0,
+      note: "No eligible emails in email_list_members.",
+    });
   }
 
   // 4) Pull existing queue emails to de-dupe
@@ -162,25 +174,18 @@ export default async function handler(req, res) {
 
     toInsert.push({
       user_id: user.id,
-
+      autoresponder_id,
       list_id,
-      lead_id: null, // we are using email_list_members, not CRM lead_id
+
+      lead_id: null, // using email_list_members, not CRM leads
       to_email: m.to_email,
       to_name: m.to_name,
+
       subject: s(ar.subject),
       template_path: s(ar.template_path),
+
       scheduled_at: now,
       status: "queued",
-
-      autoresponder_id: autoresponderId,
-      list_id: listId,
-      lead_id: m.lead_id,
-      to_email: m.email,
-      to_name: m.name || null,
-      subject,
-      template_path: ar.template_path,
-      scheduled_at: scheduledAt,
-      status: "pending",
 
       attempts: 0,
       last_error: null,
@@ -191,7 +196,12 @@ export default async function handler(req, res) {
   }
 
   if (!toInsert.length) {
-    return res.status(200).json({ ok: true, added: 0, skipped, note: "All members already queued." });
+    return res.status(200).json({
+      ok: true,
+      added: 0,
+      skipped,
+      note: "All members already queued.",
+    });
   }
 
   // 5) Insert
@@ -200,6 +210,8 @@ export default async function handler(req, res) {
     .insert(toInsert);
 
   if (insErr) {
+    // If your unique index exists (autoresponder_id,to_email) and
+    // something races, you can get duplicate errors.
     return res.status(500).json({ ok: false, error: insErr.message });
   }
 
