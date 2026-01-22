@@ -1,159 +1,178 @@
 // /pages/api/email/autoresponders/enroll-existing.js
 // FULL REPLACEMENT
 //
-// POST { autoresponder_id, list_id }
+// ✅ Enrolls EVERY email_list_members row for list_id into email_autoresponder_queue
+// ✅ De-dupes by (autoresponder_id, to_email) using your unique index
+// ✅ Multi-tenant safe: verifies list belongs to logged-in user via lead_lists
+// ✅ Auth: Bearer token (Supabase session)
 //
-// ✅ Auth: Authorization: Bearer <SUPABASE ACCESS TOKEN>
-// ✅ Looks up the autoresponder in public.email_automations (must belong to user)
-// ✅ Pulls existing members from public.email_list_members for that list (must belong to user)
-// ✅ Inserts rows into public.email_autoresponder_queue using correct columns:
-//    user_id, autoresponder_id, list_id, lead_id, to_email, to_name, subject, template_path,
-//    scheduled_at, status, attempts
+// Body:
+//  { autoresponder_id, list_id }
 //
-// IMPORTANT:
-// - This endpoint does NOT accept SendGrid keys as auth.
-// - SendGrid key stays in env as SENDGRID_API_KEY for the sender worker.
+// Returns:
+//  { ok:true, added, skipped }
 
 import { createClient } from "@supabase/supabase-js";
 
 const SUPABASE_URL =
   process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL;
 
+const SUPABASE_ANON_KEY =
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY;
+
 const SERVICE_KEY =
   process.env.SUPABASE_SERVICE_ROLE_KEY ||
-  process.env.SUPABASE_SERVICE_KEY ||
   process.env.SUPABASE_SERVICE_ROLE ||
+  process.env.SUPABASE_SERVICE_KEY ||
   process.env.SUPABASE_SERVICE;
 
-function getBearerToken(req) {
-  const h = req.headers?.authorization || "";
-  const m = String(h).match(/^Bearer\s+(.+)$/i);
-  return m ? m[1].trim() : null;
+function s(v) {
+  return String(v ?? "").trim();
+}
+
+function isEmail(v) {
+  const x = s(v).toLowerCase();
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(x);
+}
+
+async function getUserFromBearer(req) {
+  const auth = String(req.headers.authorization || "");
+  const m = auth.match(/^Bearer\s+(.+)$/i);
+  const token = s(m?.[1]);
+  if (!token) return null;
+
+  if (!SUPABASE_URL || !SUPABASE_ANON_KEY) return null;
+
+  const anon = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+    auth: { persistSession: false },
+  });
+
+  const { data, error } = await anon.auth.getUser(token);
+  if (error) return null;
+  return data?.user || null;
 }
 
 export default async function handler(req, res) {
-  try {
-    if (req.method !== "POST") {
-      return res.status(405).json({ ok: false, error: "POST only" });
+  if (req.method !== "POST") {
+    return res.status(405).json({ ok: false, error: "Method not allowed" });
+  }
+
+  if (!SUPABASE_URL || !SERVICE_KEY) {
+    return res.status(500).json({ ok: false, error: "Missing Supabase env keys" });
+  }
+
+  const user = await getUserFromBearer(req);
+  if (!user) return res.status(401).json({ ok: false, error: "Unauthorized" });
+
+  const body = req.body || {};
+  const autoresponder_id = s(body.autoresponder_id);
+  const list_id = s(body.list_id);
+
+  if (!autoresponder_id) {
+    return res.status(400).json({ ok: false, error: "Missing autoresponder_id" });
+  }
+  if (!list_id) {
+    return res.status(400).json({ ok: false, error: "Missing list_id" });
+  }
+
+  const admin = createClient(SUPABASE_URL, SERVICE_KEY, {
+    auth: { persistSession: false },
+  });
+
+  // 1) Verify autoresponder belongs to user + get subject/template_path
+  const { data: ar, error: arErr } = await admin
+    .from("email_automations")
+    .select("id,user_id,subject,template_path,is_active")
+    .eq("id", autoresponder_id)
+    .single();
+
+  if (arErr || !ar) {
+    return res.status(404).json({ ok: false, error: "Autoresponder not found" });
+  }
+  if (String(ar.user_id) !== String(user.id)) {
+    return res.status(403).json({ ok: false, error: "Forbidden" });
+  }
+
+  // Optional: only enroll if active
+  if (ar.is_active === false) {
+    return res.status(200).json({ ok: true, added: 0, skipped: 0, note: "Autoresponder is not active." });
+  }
+
+  // 2) Verify list belongs to user (multi-tenant safety)
+  const { data: listRow, error: listErr } = await admin
+    .from("lead_lists")
+    .select("id,user_id")
+    .eq("id", list_id)
+    .single();
+
+  if (listErr || !listRow) {
+    return res.status(404).json({ ok: false, error: "List not found" });
+  }
+  if (String(listRow.user_id) !== String(user.id)) {
+    return res.status(403).json({ ok: false, error: "Forbidden (list)" });
+  }
+
+  // 3) Load members from email_list_members (this has email + name)
+  const { data: members, error: memErr } = await admin
+    .from("email_list_members")
+    .select("email,name")
+    .eq("list_id", list_id);
+
+  if (memErr) {
+    return res.status(500).json({ ok: false, error: memErr.message });
+  }
+
+  const cleaned = (Array.isArray(members) ? members : [])
+    .map((m) => ({
+      to_email: s(m?.email).toLowerCase(),
+      to_name: s(m?.name) || null,
+    }))
+    .filter((m) => isEmail(m.to_email));
+
+  if (!cleaned.length) {
+    return res.status(200).json({ ok: true, added: 0, skipped: 0, note: "No eligible emails in email_list_members." });
+  }
+
+  // 4) Pull existing queue emails to de-dupe
+  const { data: existing, error: exErr } = await admin
+    .from("email_autoresponder_queue")
+    .select("to_email")
+    .eq("autoresponder_id", autoresponder_id);
+
+  if (exErr) {
+    return res.status(500).json({ ok: false, error: exErr.message });
+  }
+
+  const existingEmails = new Set(
+    (Array.isArray(existing) ? existing : [])
+      .map((r) => s(r?.to_email).toLowerCase())
+      .filter(Boolean)
+  );
+
+  const now = new Date().toISOString();
+
+  const toInsert = [];
+  let skipped = 0;
+
+  for (const m of cleaned) {
+    if (existingEmails.has(m.to_email)) {
+      skipped++;
+      continue;
     }
 
-    if (!SUPABASE_URL || !SERVICE_KEY) {
-      return res.status(500).json({
-        ok: false,
-        error: "Missing SUPABASE_URL / SERVICE_ROLE key env vars",
-      });
-    }
-
-    const token = getBearerToken(req);
-    if (!token) {
-      return res.status(401).json({ ok: false, error: "Missing Bearer token" });
-    }
-
-    const supabaseAdmin = createClient(SUPABASE_URL, SERVICE_KEY, {
-      auth: { persistSession: false },
-    });
-
-    // Verify user from JWT
-    const { data: userData, error: userErr } = await supabaseAdmin.auth.getUser(
-      token
-    );
-    const user = userData?.user;
-    if (userErr || !user) {
-      return res.status(401).json({
-        ok: false,
-        error:
-          "Invalid session. Use Supabase access token (JWT), not SendGrid key.",
-      });
-    }
-
-    const { autoresponder_id, list_id } = req.body || {};
-    const autoresponderId = String(autoresponder_id || "").trim();
-    const listId = String(list_id || "").trim();
-
-    if (!autoresponderId || !listId) {
-      return res.status(400).json({
-        ok: false,
-        error: "autoresponder_id and list_id are required",
-      });
-    }
-
-    // Load autoresponder (your table is email_automations)
-    const { data: ar, error: arErr } = await supabaseAdmin
-      .from("email_automations")
-      .select(
-        "id, user_id, is_active, subject, template_path, from_name, from_email, reply_to, send_timezone, send_day, send_time, delay_type, delay_value"
-      )
-      .eq("id", autoresponderId)
-      .eq("user_id", user.id)
-      .single();
-
-    if (arErr || !ar) {
-      return res.status(404).json({
-        ok: false,
-        error: "Autoresponder not found for this user",
-      });
-    }
-
-    if (!ar.is_active) {
-      return res.status(400).json({
-        ok: false,
-        error: "Autoresponder is not active",
-      });
-    }
-
-    if (!ar.template_path || !String(ar.template_path).trim()) {
-      return res.status(400).json({
-        ok: false,
-        error: "Autoresponder has no template_path",
-      });
-    }
-
-    const subject = String(ar.subject || "").trim();
-    if (!subject) {
-      return res.status(400).json({
-        ok: false,
-        error: "Autoresponder has no subject",
-      });
-    }
-
-    // Pull existing list members (scoped to user + list)
-    // Your screenshot shows email_list_members has user_id/list_id/lead_id/email/name/autoresponder etc.
-    const { data: members, error: memErr } = await supabaseAdmin
-      .from("email_list_members")
-      .select("lead_id, email, name, user_id, list_id")
-      .eq("user_id", user.id)
-      .eq("list_id", listId);
-
-    if (memErr) {
-      return res.status(500).json({ ok: false, error: memErr.message });
-    }
-
-    const cleaned = (members || [])
-      .map((m) => ({
-        lead_id: m?.lead_id || null,
-        email: String(m?.email || "").trim(),
-        name: String(m?.name || "").trim(),
-      }))
-      .filter((m) => !!m.email && m.email.includes("@"));
-
-    if (!cleaned.length) {
-      return res.json({
-        ok: true,
-        added: 0,
-        skipped: 0,
-        note: "No eligible emails found in email_list_members for this list.",
-      });
-    }
-
-    // Basic scheduling:
-    // For now: immediate = now(). (Your UI uses immediate / delay_value 0 anyway.)
-    const scheduledAt = new Date().toISOString();
-
-    // Insert queue rows
-    // If you add a unique index later like (autoresponder_id, lead_id) or (autoresponder_id, to_email),
-    // you can switch this to upsert with onConflict.
-    const rows = cleaned.map((m) => ({
+    toInsert.push({
       user_id: user.id,
+<<<<<<< HEAD
+      autoresponder_id,
+      list_id,
+      lead_id: null, // we are using email_list_members, not CRM lead_id
+      to_email: m.to_email,
+      to_name: m.to_name,
+      subject: s(ar.subject),
+      template_path: s(ar.template_path),
+      scheduled_at: now,
+      status: "queued",
+=======
       autoresponder_id: autoresponderId,
       list_id: listId,
       lead_id: m.lead_id,
@@ -162,52 +181,28 @@ export default async function handler(req, res) {
       subject,
       template_path: ar.template_path,
       scheduled_at: scheduledAt,
-      status: "queued",
+      status: "pending",
+>>>>>>> 524cfe9 (WIP: autoresponder + automation + sms fixes)
       attempts: 0,
-    }));
-
-    // Insert in chunks to avoid payload limits
-    let added = 0;
-    let failed = 0;
-
-    const CHUNK = 250;
-    for (let i = 0; i < rows.length; i += CHUNK) {
-      const chunk = rows.slice(i, i + CHUNK);
-
-      const { error: insErr, count } = await supabaseAdmin
-        .from("email_autoresponder_queue")
-        .insert(chunk, { count: "exact" });
-
-      if (insErr) {
-        // If you have unique constraints, duplicates might throw.
-        // We treat duplicates as "skipped" by doing a fallback per-row insert.
-        // (This keeps it robust even with different constraints across environments.)
-        for (const r of chunk) {
-          const { error: oneErr } = await supabaseAdmin
-            .from("email_autoresponder_queue")
-            .insert(r);
-          if (oneErr) failed += 1;
-          else added += 1;
-        }
-      } else {
-        added += Number(count || chunk.length);
-      }
-    }
-
-    const skipped = Math.max(0, rows.length - added - failed);
-
-    return res.json({
-      ok: true,
-      added,
-      skipped,
-      failed,
-      list_id: listId,
-      autoresponder_id: autoresponderId,
-    });
-  } catch (e) {
-    return res.status(500).json({
-      ok: false,
-      error: e?.message || String(e),
+      last_error: null,
+      provider_message_id: null,
+      sent_at: null,
+      created_at: now,
     });
   }
+
+  if (!toInsert.length) {
+    return res.status(200).json({ ok: true, added: 0, skipped, note: "All members already queued." });
+  }
+
+  // 5) Insert
+  const { error: insErr } = await admin
+    .from("email_autoresponder_queue")
+    .insert(toInsert);
+
+  if (insErr) {
+    return res.status(500).json({ ok: false, error: insErr.message });
+  }
+
+  return res.status(200).json({ ok: true, added: toInsert.length, skipped });
 }

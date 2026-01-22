@@ -1,11 +1,18 @@
 // /pages/api/email/send-broadcast.js
 // FULL REPLACEMENT
-// Fixes / Features:
-// ✅ Proper A/B split (actually sends A + B, not all B)
-// ✅ Works for "emails" or "list" audience
-// ✅ Writes email_sends rows with ab_variant + subject actually used
-// ✅ Injects REAL inbox preheader into HTML (hidden snippet at top)
-// ✅ Uses Bearer token (Supabase user session) for auth
+//
+// ✅ FIXES: 413 Body exceeded 1mb limit (Next.js API route body parser default)
+// ✅ Keeps your existing behavior:
+//    - Proper A/B split (A + B)
+//    - Works for "emails" or "list" audience
+//    - Writes email_sends rows with ab_variant + subject actually used
+//    - Injects inbox preheader into HTML
+//    - Uses Bearer token (Supabase user session) for auth
+//
+// IMPORTANT:
+// - After replacing this file, you MUST restart your dev server:
+//   1) Ctrl+C
+//   2) npm run dev
 //
 // ENV required (one of these):
 //   SENDGRID_API_KEY=SG....
@@ -14,6 +21,15 @@
 // Optional:
 //   SENDGRID_FROM_EMAIL=no-reply@gr8result.com
 //   SENDGRID_FROM_NAME=GR8 RESULT
+
+// ✅ Increase body size limit for this endpoint (fixes your 1MB error)
+export const config = {
+  api: {
+    bodyParser: {
+      sizeLimit: "20mb", // adjust if needed (e.g. "10mb", "50mb")
+    },
+  },
+};
 
 import sgMail from "@sendgrid/mail";
 import crypto from "crypto";
@@ -59,7 +75,6 @@ function injectPreheader(html, preheader) {
     `height:0;width:0;max-height:0;max-width:0;overflow:hidden;` +
     `mso-hide:all;font-size:1px;line-height:1px;">` +
     `${safe}` +
-    // padding to reduce "view in browser" etc becoming preview text
     `<span style="display:none!important;">` +
     `&nbsp;‌&nbsp;‌&nbsp;‌&nbsp;‌&nbsp;‌&nbsp;‌&nbsp;‌&nbsp;‌&nbsp;‌&nbsp;` +
     `</span>` +
@@ -69,10 +84,7 @@ function injectPreheader(html, preheader) {
 
   // If already injected, replace it
   if (s.includes('id="gr8-preheader"')) {
-    return s.replace(
-      /<div id="gr8-preheader"[\s\S]*?<\/div>/i,
-      block
-    );
+    return s.replace(/<div id="gr8-preheader"[\s\S]*?<\/div>/i, block);
   }
 
   // Insert right after <body ...> if possible
@@ -218,7 +230,19 @@ export default async function handler(req, res) {
       return res.status(400).json({ success: false, error: "Missing html" });
     }
 
-    // Preheader gets injected once and used for BOTH A & B variants (your choice)
+    // Optional safety guard (still allows big emails, but prevents insane sizes)
+    // You can increase/remove this if you want.
+    const approxBytes = Buffer.byteLength(htmlRaw, "utf8");
+    const maxHtmlBytes = 18 * 1024 * 1024; // ~18MB inside our 20MB limit
+    if (approxBytes > maxHtmlBytes) {
+      return res.status(413).json({
+        success: false,
+        error:
+          "Email HTML is too large. This usually happens when images are embedded as base64. Upload images to storage and reference URLs instead.",
+      });
+    }
+
+    // Preheader gets injected once and used for BOTH A & B variants
     const html = injectPreheader(htmlRaw, preheader);
 
     // A/B
@@ -277,7 +301,7 @@ export default async function handler(req, res) {
           from_email: fromEmail,
           from_name: fromName,
           reply_to: replyTo,
-          html_content: htmlRaw, // store raw (no hidden blocks) OR store injected — your call
+          html_content: htmlRaw,
           audience_type: audienceType || null,
           list_id: audienceType === "list" ? String(audience || "") : null,
           to_field: audienceType === "emails" ? String(audience || "") : null,
@@ -368,10 +392,8 @@ export default async function handler(req, res) {
           from: { email: fromEmail, name: fromName },
           replyTo: replyTo ? { email: replyTo } : undefined,
           subject: usedSubject,
-          html, // injected HTML (preheader included)
-          mailSettings: sandbox
-            ? { sandboxMode: { enable: true } }
-            : undefined,
+          html,
+          mailSettings: sandbox ? { sandboxMode: { enable: true } } : undefined,
         };
 
         const [resp] = await sgMail.send(msg);
@@ -397,9 +419,7 @@ export default async function handler(req, res) {
       } catch (e) {
         results.failed += 1;
         const msg = String(
-          e?.response?.body?.errors?.[0]?.message ||
-            e?.message ||
-            "SendGrid error"
+          e?.response?.body?.errors?.[0]?.message || e?.message || "SendGrid error"
         );
 
         results.errors.push({ email: to, error: msg });

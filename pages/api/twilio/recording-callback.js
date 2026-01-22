@@ -1,153 +1,129 @@
 // /pages/api/twilio/recording-callback.js
 // FULL REPLACEMENT
 //
-// ✅ Receives Twilio Recording Status Callback
-// ✅ DOES NOT append junk into Lead notes anymore
-// ✅ Upserts into public.crm_calls instead (so UI can read calls cleanly)
-//
-// Requires env:
-//  NEXT_PUBLIC_SUPABASE_URL or SUPABASE_URL
-//  SUPABASE_SERVICE_ROLE_KEY (or SUPABASE_SERVICE_KEY)
-//
-// Optional query params you MAY pass from your Twilio webhook URL:
-//  ?lead_id=<uuid>&user_id=<uuid>&account_id=<uuid>
-//
-// Twilio sends x-www-form-urlencoded by default.
+// ✅ Attaches recording to EXISTING crm_calls row
+// ✅ Preserves outbound direction
+// ✅ BACKFILLS lead_id via phone lookup if missing
+// ✅ AUTO-APPENDS recording into leads.notes
+// ✅ No fake inbound rows
+// ✅ Idempotent / retry-safe
 
 import { createClient } from "@supabase/supabase-js";
 
-function pickEnv(...keys) {
-  for (const k of keys) {
-    const v = process.env[k];
-    if (v && String(v).trim()) return String(v).trim();
-  }
-  return "";
-}
+const SUPABASE_URL =
+  process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL;
 
-const SUPABASE_URL = pickEnv("NEXT_PUBLIC_SUPABASE_URL", "SUPABASE_URL");
-const SERVICE_KEY = pickEnv("SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_SERVICE_KEY");
+const SERVICE_KEY =
+  process.env.SUPABASE_SERVICE_ROLE_KEY ||
+  process.env.SUPABASE_SERVICE_ROLE ||
+  process.env.SUPABASE_SERVICE_KEY;
 
 function s(v) {
   return String(v ?? "").trim();
 }
 
-function nowISO() {
-  try {
-    return new Date().toISOString();
-  } catch {
-    return null;
-  }
+function normPhone(v) {
+  return s(v).replace(/[^\d+]/g, "");
 }
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
     res.setHeader("Allow", "POST");
-    return res.status(405).json({ ok: false, error: "Method not allowed" });
+    return res.status(405).json({ ok: false });
   }
 
   try {
     if (!SUPABASE_URL || !SERVICE_KEY) {
-      return res.status(500).json({ ok: false, error: "Missing Supabase service env" });
+      return res.status(500).json({ ok: false, error: "Missing Supabase env" });
     }
 
     const supabase = createClient(SUPABASE_URL, SERVICE_KEY, {
-      auth: { persistSession: false, autoRefreshToken: false },
+      auth: { persistSession: false },
     });
-
-    const qLeadId = s(req.query?.lead_id || req.query?.leadId);
-    const qUserId = s(req.query?.user_id);
-    const qAccountId = s(req.query?.account_id);
 
     const body = req.body || {};
 
-    const recordingSid = s(body.RecordingSid || body.recordingSid);
-    const callSid = s(body.CallSid || body.callSid);
-    const status = s(body.RecordingStatus || body.recordingStatus);
-    const duration = body.RecordingDuration ?? body.recordingDuration;
+    const callSid = s(body.CallSid);
+    const recordingSid = s(body.RecordingSid);
+    const recordingDuration = Number(body.RecordingDuration || 0);
 
-    // Twilio usually includes RecordingUrl (base) in some callbacks
-    const recordingUrlBase = s(body.RecordingUrl || body.recordingUrl);
-    // We always store a playable local proxy URL by SID (your UI uses this)
-    const playableRecordingUrl = recordingSid
-      ? `/api/twilio/recording?sid=${encodeURIComponent(recordingSid)}`
-      : "";
-
-    // Call details if present
-    const from = s(body.From || body.from);
-    const to = s(body.To || body.to);
-    const direction = s(body.Direction || body.direction) || null;
-
-    // If Twilio didn’t give a recording, accept 200 so it doesn’t retry forever
-    if (!recordingSid && !callSid) {
-      return res.status(200).json({ ok: true, skipped: true, reason: "No RecordingSid/CallSid" });
+    if (!callSid || !recordingSid) {
+      return res.status(200).json({ ok: true, skipped: true });
     }
 
-    // Insert into crm_calls
-    // NOTE: we use twilio_sid = callSid (primary identifier of the call)
-    // and store recording_url as the playable proxy.
-    const payload = {
-      created_at: nowISO(),
-      user_id: qUserId || null,
-      account_id: qAccountId || null,
-      lead_id: qLeadId || null,
-      direction: direction || null,
-      from_number: from || null,
-      to_number: to || null,
-      status: status || null,
-      duration: callSid ? null : null,
-      recording_url: playableRecordingUrl || (recordingUrlBase ? `${recordingUrlBase}.mp3` : null),
-      recording_duration:
-        duration == null || duration === ""
-          ? null
-          : Number.isFinite(Number(duration))
-          ? Number(duration)
-          : null,
-      twilio_sid: callSid || null,
-      raw_payload: body || null,
-      unread: true,
-    };
+    const recordingUrl = `/api/twilio/recording?sid=${encodeURIComponent(
+      recordingSid
+    )}`;
 
-    // Best-effort UPSERT by twilio_sid (if you have a unique index great; if not, fallback insert)
-    // We won't assume your constraint exists; attempt update first.
-    if (payload.twilio_sid) {
-      const { data: existing, error: selErr } = await supabase
-        .from("crm_calls")
-        .select("id, twilio_sid")
-        .eq("twilio_sid", payload.twilio_sid)
-        .maybeSingle();
+    // 1️⃣ Load existing call row
+    const { data: callRow } = await supabase
+      .from("crm_calls")
+      .select(
+        "id, lead_id, user_id, from_number, to_number"
+      )
+      .eq("twilio_sid", callSid)
+      .maybeSingle();
 
-      if (!selErr && existing?.id) {
-        const { error: updErr } = await supabase
-          .from("crm_calls")
-          .update({
-            ...payload,
-            // don't override created_at on update if you prefer; but safe either way
-          })
-          .eq("id", existing.id);
+    let leadId = callRow?.lead_id || null;
+    let userId = callRow?.user_id || null;
 
-        if (updErr) {
-          console.error("crm_calls update error:", updErr);
+    // 2️⃣ Backfill lead_id via phone lookup IF missing
+    if (!leadId) {
+      const phone =
+        normPhone(callRow?.from_number) ||
+        normPhone(body.From) ||
+        normPhone(body.Caller);
+
+      if (phone) {
+        const { data: lead } = await supabase
+          .from("leads")
+          .select("id,user_id,notes")
+          .or(
+            `phone.eq.${phone},phone.eq.${phone.replace(/^61/, "0")}`
+          )
+          .limit(1)
+          .maybeSingle();
+
+        if (lead) {
+          leadId = lead.id;
+          userId = lead.user_id || null;
         }
-
-        return res.status(200).json({ ok: true, stored: "crm_calls:update", twilio_sid: payload.twilio_sid });
       }
     }
 
-    const { error: insErr } = await supabase.from("crm_calls").insert(payload);
-    if (insErr) {
-      console.error("crm_calls insert error:", insErr);
-      return res.status(200).json({
-        ok: true,
-        stored: false,
-        warning: "Callback received but crm_calls insert failed",
-        error: insErr.message,
+    // 3️⃣ Update crm_calls (NO new rows)
+    await supabase
+      .from("crm_calls")
+      .update({
+        recording_url: recordingUrl,
+        recording_duration: Number.isFinite(recordingDuration)
+          ? recordingDuration
+          : null,
+        has_recording: true,
+        direction: "outbound",
+        unread: true,
+        lead_id: leadId,
+        user_id: userId,
+      })
+      .eq("twilio_sid", callSid);
+
+    // 4️⃣ Append into leads.notes (AUTO)
+    if (leadId) {
+      const stamp = new Date().toLocaleString();
+      const line =
+        `[${stamp}] Call recorded (${recordingDuration}s)\n` +
+        `Recording: ${recordingUrl}\n\n`;
+
+      await supabase.rpc("append_lead_note_safe", {
+        p_lead_id: leadId,
+        p_text: line,
       });
     }
 
-    return res.status(200).json({ ok: true, stored: "crm_calls:insert", twilio_sid: payload.twilio_sid || null });
+    return res.status(200).json({ ok: true });
   } catch (e) {
-    console.error("[/api/twilio/recording-callback] error:", e);
-    // Always 200 to Twilio to avoid infinite retries
-    return res.status(200).json({ ok: false, error: e?.message || "Callback failed" });
+    console.error("[recording-callback]", e);
+    return res.status(200).json({ ok: false });
   }
 }
+v

@@ -2,26 +2,15 @@
 // FULL REPLACEMENT
 //
 // ✅ Keeps LEFT dialer (BrowserDialer) intact
-<<<<<<< HEAD
-// ✅ Notes Timeline INSIDE Notes box (scrollable)
-// ✅ Audio recordings appear INSIDE Notes Timeline (not outside)
-// ✅ No SID/junk text in notes
-// ✅ Loads recordings from:
-//    1) /api/crm/lead-call-recordings?lead_id=...
-//    2) /api/twilio/list-call-recordings?phone=... (optional)
-// ✅ Audio playback uses:
-//    - /api/twilio/recording?sid=RE...
-//    - OR /api/twilio/recording-audio?url=...
-=======
-// ✅ REMOVES the big useless panel above Notes textarea (the one in your screenshot)
-// ✅ Shows REAL call recordings INSIDE the Notes section, in date order
-// ✅ Loads recordings from BOTH:
-//    1) Supabase table crm_calls (by lead_id)  <-- NOW via server API /api/crm/lead-call-recordings (service role)
-//    2) Twilio API /api/twilio/list-call-recordings?phone=...
-// ✅ Dedupes recordings so you don’t see doubles
-// ✅ Uses /api/twilio/recording?sid=RE... and /api/twilio/recording-audio?url=...
-// ✅ Cleans “Call recording ready...” junk from notes (on load + on save)
->>>>>>> 524cfe9 (WIP: autoresponder + automation + sms fixes)
+// ✅ NO “audio player panel above notes” (recordings are rendered as compact timeline rows INSIDE the Notes box)
+// ✅ DOES NOT write any junk text into notes (NO SID markers / NO auto-import text)
+// ✅ Loads recordings from Supabase crm_calls via server API: /api/crm/lead-call-recordings (service role)
+// ✅ Also tries Twilio list endpoint (optional): /api/twilio/list-call-recordings?phone=...
+// ✅ Plays audio using:
+//    - recordingUrl -> /api/twilio/recording-audio?url=...
+//    - recordingSid (RE...) -> /api/twilio/recording?sid=...
+// ✅ Dedupes + sorts newest first
+// ✅ Fixes the hard-coded placeholder name (“Grant”) to generic text
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/router";
@@ -40,6 +29,7 @@ export default function LeadDetailsModal({
   onNotesUpdated,
 }) {
   const router = useRouter();
+
   if (!isOpen || !lead) return null;
 
   // -------------------- HELPERS --------------------
@@ -59,7 +49,7 @@ export default function LeadDetailsModal({
     return v;
   }
 
-  function fmtDateTime(value) {
+  function formatCallTime(value) {
     if (!value) return "";
     const d = new Date(value);
     if (Number.isNaN(d.getTime())) return "";
@@ -73,7 +63,7 @@ export default function LeadDetailsModal({
     });
   }
 
-  function fmtDuration(value) {
+  function formatDurationSeconds(value) {
     if (value == null) return "";
     const n = Number(value);
     if (!Number.isFinite(n)) return "";
@@ -88,28 +78,26 @@ export default function LeadDetailsModal({
     return `${m}m ${rem}s`;
   }
 
-  // Remove old junk from notes text ONLY (text area should stay clean)
-  function stripCallJunk(text) {
+  // Clean ONLY legacy “Call recording ready...” junk. DOES NOT remove real user notes.
+  function stripLegacyCallJunk(text) {
     const raw = String(text || "");
     const lines = raw.split(/\r?\n/);
     const out = [];
-    let skipping = false;
 
-    for (const line of lines) {
+    let skipping = false;
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
       const l = line.trim();
 
       if (/^Call recording ready/i.test(l)) {
         skipping = true;
         continue;
       }
+
       if (skipping) {
         if (!l) skipping = false;
         continue;
       }
-
-      if (/^\s*===\s*Call Recordings/i.test(l)) continue;
-      if (/\[REC:.*\]/i.test(l)) continue;
-      if (/\[RECURL:.*\]/i.test(l)) continue;
 
       out.push(line);
     }
@@ -117,7 +105,8 @@ export default function LeadDetailsModal({
     return out.join("\n").replace(/\n{4,}/g, "\n\n\n").trimEnd();
   }
 
-  // Extract RE... from Twilio Recording URL if present
+  // Try to extract a Twilio Recording SID from a Twilio RecordingUrl
+  // Typical: https://api.twilio.com/2010-04-01/Accounts/{AC}/Recordings/RE123....json
   function extractRecordingSidFromUrl(url) {
     const u = s(url);
     if (!u) return "";
@@ -125,40 +114,14 @@ export default function LeadDetailsModal({
     return m?.[1] || "";
   }
 
-  // Parse text notes into timeline chunks by [timestamp] headers you already use
-  function parseNotesToTimeline(text) {
-    const t = String(text || "").trim();
-    if (!t) return [];
-    const lines = t.split(/\r?\n/);
-
-    const items = [];
-    let current = null;
-
-    for (const line of lines) {
-      const m = line.match(/^\s*\[([^\]]+)\]\s*$/);
-      if (m) {
-        if (current) items.push(current);
-        current = { stamp: m[1], body: "" };
-        continue;
-      }
-      if (!current) current = { stamp: "", body: "" };
-      current.body += (current.body ? "\n" : "") + line;
-    }
-    if (current) items.push(current);
-
-    // newest first if timestamps exist; otherwise keep order
-    return items.reverse().map((x, idx) => ({ ...x, key: `note:${idx}` }));
-  }
-
-  // -------------------- COLORS --------------------
+  // -------------------- STYLES / COLORS --------------------
   const stageColor = stages.find((st) => st.id === lead.stage)?.color || "#3b82f6";
   const panelTint = {
     background: `linear-gradient(135deg, rgba(15,23,42,0.98), ${stageColor}33)`,
   };
 
   // -------------------- STATE --------------------
-  const [leadNotes, setLeadNotes] = useState(stripCallJunk(lead.notes || ""));
-
+  const [leadNotes, setLeadNotes] = useState(stripLegacyCallJunk(lead.notes || ""));
   const [leadTasks, setLeadTasks] = useState([]);
   const [tasksLoading, setTasksLoading] = useState(false);
 
@@ -167,23 +130,19 @@ export default function LeadDetailsModal({
   const [newTaskDate, setNewTaskDate] = useState("");
   const [newTaskTime, setNewTaskTime] = useState("");
 
-  // voice-to-text
+  // voice-to-text (microphone)
   const [isRecording, setIsRecording] = useState(false);
   const recognitionRef = useRef(null);
   const recordingRef = useRef(false);
   const silenceTimeoutRef = useRef(null);
 
-  // dialer
+  // dialer toggle
   const [showDialer, setShowDialer] = useState(true);
 
-  // recordings
+  // recordings (merged)
   const [recLoading, setRecLoading] = useState(false);
   const [recError, setRecError] = useState("");
-<<<<<<< HEAD
-  const [recordings, setRecordings] = useState([]);
-=======
   const [mergedRecordings, setMergedRecordings] = useState([]);
->>>>>>> 524cfe9 (WIP: autoresponder + automation + sms fixes)
 
   // calendar
   const [isCalendarOpen, setIsCalendarOpen] = useState(false);
@@ -193,7 +152,7 @@ export default function LeadDetailsModal({
     return d;
   });
 
-  // automation
+  // automation panel
   const [showAutomation, setShowAutomation] = useState(false);
 
   // draggable + resizable
@@ -216,7 +175,8 @@ export default function LeadDetailsModal({
   useEffect(() => {
     if (!isOpen || !lead || !userId) return;
 
-    setLeadNotes(stripCallJunk(lead.notes || ""));
+    // load notes (only strip legacy junk)
+    setLeadNotes(stripLegacyCallJunk(lead.notes || ""));
 
     setLeadTasks([]);
     setNewTaskText("");
@@ -227,20 +187,17 @@ export default function LeadDetailsModal({
     setShowAutomation(false);
 
     setRecError("");
-    setRecordings([]);
+    setMergedRecordings([]);
 
     setModalOffset({ x: 0, y: 0 });
     setModalSize({ width: DEFAULT_WIDTH, height: DEFAULT_HEIGHT });
 
     loadTasksForLead(lead.id);
 
+    // load recordings (db + twilio)
     loadAllRecordings();
-    setTimeout(() => loadAllRecordings(), 6000);
-    setTimeout(() => loadAllRecordings(), 15000);
-    setTimeout(() => loadAllRecordings(), 30000);
 
-    // OPTIONAL: recordings sometimes take time to appear after hangup
-    // (keeps UI exactly same, just refreshes quietly)
+    // recordings can appear after hangup
     setTimeout(() => loadAllRecordings(), 6000);
     setTimeout(() => loadAllRecordings(), 15000);
     setTimeout(() => loadAllRecordings(), 30000);
@@ -290,7 +247,7 @@ export default function LeadDetailsModal({
     return () => document.removeEventListener("mousedown", onDocClick);
   }, [showAutomation]);
 
-  // -------------------- TASKS --------------------
+  // -------------------- DB HELPERS --------------------
   async function loadTasksForLead(leadId) {
     if (!userId || !leadId) return;
     setTasksLoading(true);
@@ -311,50 +268,11 @@ export default function LeadDetailsModal({
     setTasksLoading(false);
   }
 
-<<<<<<< HEAD
-  // -------------------- RECORDINGS --------------------
-  function pickFirstUrl(obj) {
-    // brute-force: try many common names you’ve used across versions
-    const candidates = [
-      obj?.recordingUrl,
-      obj?.recording_url,
-      obj?.recording_url_json,
-      obj?.recordingUrlJson,
-      obj?.url,
-      obj?.media_url,
-      obj?.mediaUrl,
-      obj?.recording,
-      obj?.recordingLink,
-      obj?.recording_link,
-      obj?.recording_uri,
-      obj?.recordingUri,
-    ];
-
-    for (const c of candidates) {
-      const v = s(c);
-      if (v) return v;
-    }
-
-    // if it’s nested JSON-ish
-    try {
-      const asObj = typeof obj?.recording_url_json === "string" ? JSON.parse(obj.recording_url_json) : null;
-      const v = s(asObj?.url || asObj?.recordingUrl || asObj?.recording_url);
-      if (v) return v;
-    } catch {}
-    return "";
-  }
-
-=======
   // Load recordings from crm_calls via SERVER API (service role) to avoid RLS empty results in browser
->>>>>>> 524cfe9 (WIP: autoresponder + automation + sms fixes)
   async function loadDbRecordings() {
     try {
       if (!lead?.id) return [];
 
-<<<<<<< HEAD
-=======
-      // must be logged in to call server endpoint securely
->>>>>>> 524cfe9 (WIP: autoresponder + automation + sms fixes)
       const { data: sessionData } = await supabase.auth.getSession();
       const token = sessionData?.session?.access_token || "";
       if (!token) return [];
@@ -371,46 +289,63 @@ export default function LeadDetailsModal({
 
       const rows = Array.isArray(j?.recordings) ? j.recordings : [];
 
-<<<<<<< HEAD
-      return rows
-        .map((row) => {
-          const recUrl = pickFirstUrl(row);
-          const recSid = extractRecordingSidFromUrl(recUrl) || (s(row?.recording_sid).startsWith("RE") ? s(row.recording_sid) : "");
-
-          const createdAt = row?.created_at || row?.createdAt || row?.timestamp || row?.dateCreated || null;
-          const duration = row?.duration ?? row?.recording_duration ?? row?.recordingDuration ?? null;
-
-          const key = recSid ? `sid:${recSid}` : recUrl ? `url:${recUrl}` : `db:${Math.random().toString(16).slice(2)}`;
-=======
-      // map api rows to unified recording items
       return (rows || [])
-        .filter((r) => r && (s(r.recordingUrl) || s(r.sid)))
-        .map((r) => {
-          const recUrl = s(r.recordingUrl || r.recording_url || r.url || "");
-          const sid = s(r.sid || r.recordingSid || r.recording_sid || "") || extractRecordingSidFromUrl(recUrl);
+        .filter((row) => row && (s(row.recording_url) || s(row.recordingUrl) || s(row.recording_url_text) || s(row.recordingSid) || s(row.recording_sid) || s(row.sid)))
+        .map((row) => {
+          // IMPORTANT:
+          // - crm_calls often has recording_url (Twilio recording URL) and call_sid (CA...) etc.
+          // - We DO NOT treat CA... as a recording sid (recording sids are RE...)
+          const recordingUrl = s(
+            row.recordingUrl ||
+              row.recording_url ||
+              row.recording_url_text ||
+              row.recordingUrlText ||
+              row.recording ||
+              row.url ||
+              ""
+          );
 
-          const createdAt = r.createdAt || r.created_at || r.dateCreated || r.date_created || r.created || null;
-          const duration = r.duration ?? r.recordingDuration ?? r.recording_duration ?? null;
+          const extractedRecordingSid = extractRecordingSidFromUrl(recordingUrl);
+          const recordingSid = s(row.recordingSid || row.recording_sid || "").startsWith("RE")
+            ? s(row.recordingSid || row.recording_sid)
+            : extractedRecordingSid || "";
 
-          const key = sid ? `sid:${sid}` : recUrl ? `url:${recUrl}` : `db:${Math.random().toString(16).slice(2)}`;
->>>>>>> 524cfe9 (WIP: autoresponder + automation + sms fixes)
+          const createdAt =
+            row.createdAt ||
+            row.created_at ||
+            row.dateCreated ||
+            row.date_created ||
+            row.created ||
+            row.timestamp ||
+            null;
+
+          const duration = row.duration ?? row.recordingDuration ?? row.recording_duration ?? row.recording_duration_seconds ?? null;
+
+          const from = s(row.from || row.from_number || row.caller || row.src || row.caller_name || "");
+          const to = s(row.to || row.to_number || row.called || row.dst || "");
+
+          // stable key for dedupe
+          const key =
+            recordingSid ? `re:${recordingSid}` : recordingUrl ? `url:${recordingUrl}` : `db:${row.id || Math.random().toString(16).slice(2)}`;
 
           return {
             key,
             source: "db",
-            sid: recSid || "",
-            recordingUrl: recUrl || "",
+            recordingSid,
+            recordingUrl,
             createdAt,
             duration,
+            from,
+            to,
           };
-        })
-        .filter((x) => x.recordingUrl || (x.sid && x.sid.startsWith("RE")));
+        });
     } catch (e) {
       console.error("loadDbRecordings error:", e);
       return [];
     }
   }
 
+  // Load recordings from Twilio API route (optional)
   async function loadTwilioRecordings() {
     const rawPhone = s(lead?.phone);
     if (!rawPhone) return [];
@@ -426,13 +361,11 @@ export default function LeadDetailsModal({
       const recs = Array.isArray(j?.recordings) ? j.recordings : [];
 
       return recs
+        .filter((x) => x && (s(x.recordingSid || x.sid) || s(x.recordingUrl || x.recording_url || x.url)))
         .map((x) => {
-          const sid = s(x.sid || x.recordingSid);
-<<<<<<< HEAD
-          const createdAt = x.dateCreated || x.createdAt || x.created_at || x.timestamp || null;
-          const duration = x.duration ?? x.recordingDuration ?? null;
-          if (!sid) return null;
-=======
+          const recordingUrl = s(x.recordingUrl || x.recording_url || x.url || "");
+          const extracted = extractRecordingSidFromUrl(recordingUrl);
+          const recordingSid = s(x.recordingSid || x.sid).startsWith("RE") ? s(x.recordingSid || x.sid) : extracted || "";
 
           const createdAt =
             x.dateCreated ||
@@ -446,70 +379,82 @@ export default function LeadDetailsModal({
 
           const duration = x.duration ?? x.recordingDuration ?? x.recording_duration ?? null;
 
->>>>>>> 524cfe9 (WIP: autoresponder + automation + sms fixes)
+          const from = s(x.from || x.from_number || x.caller || "");
+          const to = s(x.to || x.to_number || x.called || "");
+
+          const key = recordingSid ? `re:${recordingSid}` : recordingUrl ? `url:${recordingUrl}` : `tw:${Math.random().toString(16).slice(2)}`;
+
           return {
-            key: `sid:${sid}`,
+            key,
             source: "twilio",
-            sid,
-            recordingUrl: "",
+            recordingSid,
+            recordingUrl,
             createdAt,
             duration,
+            from,
+            to,
           };
-        })
-        .filter(Boolean);
+        });
     } catch (e) {
       console.error("loadTwilioRecordings error:", e);
-      return [];
+      throw e;
     }
   }
 
-  function getAudioSrc(item) {
-    const sid = s(item?.sid);
-    const url = s(item?.recordingUrl);
-    if (sid && sid.startsWith("RE")) return `/api/twilio/recording?sid=${encodeURIComponent(sid)}`;
-    if (url) return `/api/twilio/recording-audio?url=${encodeURIComponent(url)}`;
-    return "";
-  }
-
+  // Merge + dedupe + sort by date DESC
   async function loadAllRecordings() {
     setRecLoading(true);
     setRecError("");
-    setRecordings([]);
+    setMergedRecordings([]);
 
     try {
-<<<<<<< HEAD
-      const [dbList, twList] = await Promise.all([loadDbRecordings(), loadTwilioRecordings()]);
-      const map = new Map();
-
-      // Prefer DB (it has URLs)
-=======
       const [dbList, twList] = await Promise.all([loadDbRecordings(), loadTwilioRecordings().catch(() => [])]);
 
       const map = new Map();
 
->>>>>>> 524cfe9 (WIP: autoresponder + automation + sms fixes)
-      for (const item of dbList) {
-        const k = item.sid ? `sid:${item.sid}` : item.recordingUrl ? `url:${item.recordingUrl}` : item.key;
-        map.set(k, item);
+      function dedupeKey(item) {
+        const re = s(item?.recordingSid);
+        const url = s(item?.recordingUrl);
+        if (re) return `re:${re}`;
+        if (url) return `url:${url}`;
+        return s(item?.key) || `x:${Math.random().toString(16).slice(2)}`;
       }
 
-      // Add Twilio if missing
+      for (const item of dbList) {
+        if (!item) continue;
+        map.set(dedupeKey(item), item);
+      }
+
       for (const item of twList) {
-        const k = item.sid ? `sid:${item.sid}` : item.key;
+        if (!item) continue;
+        const k = dedupeKey(item);
         if (!map.has(k)) map.set(k, item);
+        else {
+          const existing = map.get(k);
+          map.set(k, {
+            ...existing,
+            // prefer DB but fill gaps
+            recordingUrl: existing?.recordingUrl || item?.recordingUrl || "",
+            createdAt: existing?.createdAt || item?.createdAt || null,
+            duration: existing?.duration ?? item?.duration ?? null,
+            from: existing?.from || item?.from || "",
+            to: existing?.to || item?.to || "",
+          });
+        }
       }
 
       const merged = Array.from(map.values());
+
       merged.sort((a, b) => {
         const ta = a?.createdAt ? new Date(a.createdAt).getTime() : 0;
         const tb = b?.createdAt ? new Date(b.createdAt).getTime() : 0;
         return tb - ta;
       });
 
-      setRecordings(merged);
+      setMergedRecordings(merged);
     } catch (e) {
       setRecError(e?.message || "Unable to load recordings.");
-      setRecordings([]);
+      setMergedRecordings([]);
     } finally {
       setRecLoading(false);
     }
@@ -518,20 +463,20 @@ export default function LeadDetailsModal({
   // -------------------- NOTES SAVE --------------------
   async function handleSaveLeadNotes() {
     if (!lead) return;
-    const clean = stripCallJunk(leadNotes);
+
+    const clean = stripLegacyCallJunk(leadNotes);
 
     try {
       const { error } = await supabase.from("leads").update({ notes: clean, updated_at: new Date() }).eq("id", lead.id);
-<<<<<<< HEAD
-=======
 
->>>>>>> 524cfe9 (WIP: autoresponder + automation + sms fixes)
       if (error) {
         console.error("Save notes error:", error);
         alert("There was an error saving notes.");
         return;
       }
+
       if (onNotesUpdated) onNotesUpdated(lead.id, clean);
+
       alert("Notes saved.");
       handleCloseInternal();
     } catch (err) {
@@ -540,7 +485,7 @@ export default function LeadDetailsModal({
     }
   }
 
-  // -------------------- VOICE TO TEXT --------------------
+  // -------------------- VOICE TO TEXT (MIC) --------------------
   function addTimestampHeader() {
     const now = new Date();
     const stamp = now.toLocaleString("en-AU", {
@@ -563,7 +508,9 @@ export default function LeadDetailsModal({
 
   function resetSilenceTimer() {
     if (silenceTimeoutRef.current) clearTimeout(silenceTimeoutRef.current);
-    if (recordingRef.current) silenceTimeoutRef.current = setTimeout(() => stopRecording(), 20000);
+    if (recordingRef.current) {
+      silenceTimeoutRef.current = setTimeout(() => stopRecording(), 20000);
+    }
   }
 
   function clearSilenceTimer() {
@@ -610,20 +557,19 @@ export default function LeadDetailsModal({
         setLeadNotes((prevRaw) => {
           const prev = prevRaw || "";
           if (!prev) return text;
+
           const lastChar = prev.slice(-1);
           const firstChar = text[0];
-<<<<<<< HEAD
-          const needsSpace = ![" ", "\n"].includes(lastChar) && !["\n", ".", ",", "!", "?", ":"].includes(firstChar);
-=======
 
           const needsSpace = ![" ", "\n"].includes(lastChar) && !["\n", ".", ",", "!", "?", ":"].includes(firstChar);
 
->>>>>>> 524cfe9 (WIP: autoresponder + automation + sms fixes)
           return prev + (needsSpace ? " " : "") + text;
         });
       };
 
-      recognition.onerror = (event) => console.error("Speech recognition error:", event);
+      recognition.onerror = (event) => {
+        console.error("Speech recognition error:", event);
+      };
 
       recognition.onend = () => {
         clearSilenceTimer();
@@ -650,10 +596,11 @@ export default function LeadDetailsModal({
   function startRecording() {
     const recognition = initRecognition();
     if (!recognition) return;
-    if (recordingRef.current) return;
 
+    if (recordingRef.current) return;
     recordingRef.current = true;
     setIsRecording(true);
+
     addTimestampHeader();
 
     try {
@@ -671,6 +618,7 @@ export default function LeadDetailsModal({
     recordingRef.current = false;
     setIsRecording(false);
     clearSilenceTimer();
+
     if (!recognition) return;
     try {
       recognition.stop();
@@ -698,11 +646,21 @@ export default function LeadDetailsModal({
   }
 
   async function handleAddUpcomingTask() {
-    if (!userId || !lead) return alert("No lead or user loaded.");
+    if (!userId || !lead) {
+      alert("No lead or user loaded.");
+      return;
+    }
 
     const text = newTaskText.trim();
-    if (!text) return alert("Please add what the task is about.");
-    if (!newTaskDate) return alert("Please choose a date from the calendar.");
+    if (!text) {
+      alert("Please add what the task is about.");
+      return;
+    }
+
+    if (!newTaskDate) {
+      alert("Please choose a date from the calendar.");
+      return;
+    }
 
     const timeString = newTaskTime || "09:00";
     const whenText = new Date(`${newTaskDate}T${timeString}:00`).toLocaleString("en-AU", {
@@ -729,9 +687,11 @@ export default function LeadDetailsModal({
     };
 
     const { data, error } = await supabase.from("crm_tasks").insert(payload).select().single();
+
     if (error) {
       console.error("Add upcoming task error:", error);
-      return alert("There was an error saving the task / reminder.");
+      alert("There was an error saving the task / reminder.");
+      return;
     }
 
     setLeadTasks((prev) => [data, ...prev]);
@@ -739,6 +699,7 @@ export default function LeadDetailsModal({
     setNewTaskDate("");
     setNewTaskTime("");
     setIsCalendarOpen(false);
+
     alert("Upcoming task added.");
   }
 
@@ -813,8 +774,35 @@ export default function LeadDetailsModal({
 
   const leadEmail = s(lead.email);
 
-  // Timeline data
-  const noteItems = useMemo(() => parseNotesToTimeline(leadNotes), [leadNotes]);
+  // Audio URL resolver:
+  // - recordingSid (RE...) -> /api/twilio/recording?sid=...
+  // - recordingUrl -> /api/twilio/recording-audio?url=...
+  function getAudioSrc(item) {
+    const reSid = s(item?.recordingSid);
+    const url = s(item?.recordingUrl);
+
+    if (reSid && reSid.startsWith("RE")) {
+      return `/api/twilio/recording?sid=${encodeURIComponent(reSid)}`;
+    }
+    if (url) {
+      return `/api/twilio/recording-audio?url=${encodeURIComponent(url)}`;
+    }
+    return "";
+  }
+
+  function handleInsertRecordingTimestamp(rec) {
+    const stamp = rec?.createdAt ? formatCallTime(rec.createdAt) : "";
+    const dur = rec?.duration != null ? formatDurationSeconds(rec.duration) : "";
+    const header = stamp ? `[${stamp}]` : "[Call Recording]";
+    const suffix = dur ? ` (Duration ${dur})` : "";
+    const line = `${header} 🎧 Call recording${suffix}`;
+
+    setLeadNotes((prev) => {
+      const p = String(prev || "").trim();
+      if (!p) return `${line}\n`;
+      return `${p}\n\n${line}\n`;
+    });
+  }
 
   return (
     <div style={styles.modalOverlay}>
@@ -934,48 +922,60 @@ export default function LeadDetailsModal({
                 </div>
               </label>
 
-              {/* ✅ NOTES TIMELINE (RECORDINGS + NOTES) */}
-              <div style={styles.timelineBox}>
-                {recError ? <div style={styles.timelineError}>{recError}</div> : null}
+              {/* RECORDINGS TIMELINE (COMPACT, INSIDE NOTES BOX) */}
+              <div style={styles.notesRecList}>
+                {recError ? <div style={styles.notesRecError}>{recError}</div> : null}
 
-                {/* Recordings section INSIDE timeline */}
-                <div style={styles.timelineSectionHeader}>Call recordings</div>
-                {(!recordings || recordings.length === 0) && !recLoading ? (
-                  <div style={styles.timelineEmpty}>No call recordings for this lead.</div>
+                {!recError && mergedRecordings.length === 0 && !recLoading ? (
+                  <div style={styles.notesRecEmpty}>No recordings found for this lead.</div>
                 ) : null}
 
-                {(recordings || []).slice(0, 20).map((r) => {
+                {mergedRecordings.slice(0, 10).map((r) => {
                   const src = getAudioSrc(r);
-                  if (!src) return null;
+                  const stamp = r.createdAt ? formatCallTime(r.createdAt) : "";
+                  const dur = r.duration != null ? formatDurationSeconds(r.duration) : "";
+
                   return (
-                    <div key={r.key} style={styles.timelineItem}>
-                      <div style={styles.timelineMetaRow}>
-                        <span style={styles.timelineStamp}>{r.createdAt ? fmtDateTime(r.createdAt) : ""}</span>
-                        <span style={styles.timelineStamp}>{r.duration != null ? fmtDuration(r.duration) : ""}</span>
+                    <div key={r.key} style={styles.notesRecItem}>
+                      <div style={styles.notesRecTopRow}>
+                        <span style={styles.notesRecMeta}>{stamp}</span>
+                        <span style={styles.notesRecMeta}>{dur}</span>
                       </div>
-                      <audio controls preload="metadata" style={styles.timelineAudio} src={src} />
+
+                      <div style={styles.notesRecMidRow}>
+                        <span style={styles.notesRecMetaSoft}>
+                          {r.to ? `To: ${r.to}` : ""}
+                          {r.to && r.from ? "  •  " : ""}
+                          {r.from ? `From: ${r.from}` : ""}
+                        </span>
+
+                        <button
+                          type="button"
+                          onClick={() => handleInsertRecordingTimestamp(r)}
+                          style={styles.notesRecInsertBtn}
+                          title="Insert a simple line into notes at the bottom (no SID, no junk)"
+                        >
+                          + add note line
+                        </button>
+                      </div>
+
+                      {src ? (
+                        <audio controls preload="metadata" style={styles.notesRecAudio} src={src} />
+                      ) : (
+                        <div style={styles.notesRecError}>Recording has no playable source (missing recording_url / recording sid).</div>
+                      )}
+
+                      <div style={styles.notesRecSourceRow}>
+                        <span style={styles.notesRecSourceChip}>{r.source === "db" ? "Supabase" : "Twilio"}</span>
+                      </div>
                     </div>
                   );
                 })}
-
-                {/* Notes section INSIDE timeline */}
-                <div style={{ ...styles.timelineSectionHeader, marginTop: 12 }}>Notes</div>
-                {noteItems.length === 0 ? <div style={styles.timelineEmpty}>No notes yet.</div> : null}
-
-                {noteItems.map((n) => (
-                  <div key={n.key} style={styles.timelineItem}>
-                    <div style={styles.timelineMetaRow}>
-                      <span style={styles.timelineStamp}>{n.stamp || ""}</span>
-                      <span />
-                    </div>
-                    <div style={styles.timelineNoteBody}>{n.body || ""}</div>
-                  </div>
-                ))}
               </div>
 
-              {/* TEXTAREA (text only) */}
+              {/* NOTES TEXTAREA (ONLY USER NOTES) */}
               <textarea
-                rows={6}
+                rows={10}
                 style={{ ...styles.notesTextarea, fontSize: scaled(16) }}
                 value={leadNotes}
                 onChange={(e) => setLeadNotes(e.target.value)}
@@ -1001,7 +1001,7 @@ export default function LeadDetailsModal({
                   value={newTaskText}
                   onChange={(e) => setNewTaskText(e.target.value)}
                   style={{ ...styles.addTaskTextInput, fontSize: scaled(12) }}
-                  placeholder="e.g. Call Grant about new car"
+                  placeholder="e.g. Call lead about follow-up"
                 />
               </div>
 
@@ -1034,6 +1034,7 @@ export default function LeadDetailsModal({
                       <div style={styles.calendarGrid}>
                         {calendarCells.map((day, idx) => {
                           if (!day) return <span key={idx} style={styles.calendarEmptyCell} />;
+
                           const iso = toISODate(day);
                           const isToday = iso === todayStr;
                           const isSelected = iso === newTaskDate;
@@ -1076,7 +1077,11 @@ export default function LeadDetailsModal({
             <button
               type="button"
               onClick={() => alert("Add to CRM is already active for this lead.")}
-              style={{ ...styles.footerBtn, background: "rgba(34,197,94,0.15)", border: "1px solid rgba(34,197,94,0.45)" }}
+              style={{
+                ...styles.footerBtn,
+                background: "rgba(34,197,94,0.15)",
+                border: "1px solid rgba(34,197,94,0.45)",
+              }}
               disabled={!lead?.id}
               title="Add to CRM"
             >
@@ -1087,7 +1092,11 @@ export default function LeadDetailsModal({
               id="gr8-automation-toggle"
               type="button"
               onClick={() => setShowAutomation((p) => !p)}
-              style={{ ...styles.footerBtn, background: "rgba(59,130,246,0.15)", border: "1px solid rgba(59,130,246,0.45)" }}
+              style={{
+                ...styles.footerBtn,
+                background: "rgba(59,130,246,0.15)",
+                border: "1px solid rgba(59,130,246,0.45)",
+              }}
               disabled={!lead?.id}
               title="Send this lead into an Automation Flow"
             >
@@ -1273,54 +1282,51 @@ const styles = {
     cursor: "pointer",
   },
 
-  timelineBox: {
-    borderRadius: 10,
-    border: "1px solid rgba(148,163,184,0.22)",
-    background: "rgba(2,6,23,0.35)",
-    padding: "10px",
+  notesRecList: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 8,
     marginBottom: 10,
-    overflowY: "auto",
-    maxHeight: 240,
   },
 
-  timelineSectionHeader: {
+  notesRecError: {
     fontSize: 12,
-    fontWeight: 900,
-    color: "#e5e7eb",
-    opacity: 0.9,
-    marginBottom: 6,
+    fontWeight: 800,
+    color: "#fecaca",
+    opacity: 0.95,
   },
 
-  timelineEmpty: {
+  notesRecEmpty: {
     fontSize: 12,
     fontWeight: 800,
     color: "#94a3b8",
-    padding: "4px 0 10px",
+    opacity: 0.95,
+    padding: "6px 2px",
   },
 
-  timelineError: {
-    fontSize: 12,
-    fontWeight: 900,
-    color: "#fecaca",
-    marginBottom: 8,
-  },
-
-  timelineItem: {
+  notesRecItem: {
     borderRadius: 10,
     border: "1px solid rgba(148,163,184,0.14)",
     background: "rgba(2,6,23,0.45)",
     padding: "8px 10px",
-    marginBottom: 8,
   },
 
-  timelineMetaRow: {
+  notesRecTopRow: {
     display: "flex",
     justifyContent: "space-between",
     gap: 10,
     marginBottom: 6,
   },
 
-  timelineStamp: {
+  notesRecMidRow: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    gap: 10,
+    marginBottom: 6,
+  },
+
+  notesRecMeta: {
     fontSize: 12,
     fontWeight: 800,
     color: "#e5e7eb",
@@ -1328,17 +1334,50 @@ const styles = {
     minHeight: 16,
   },
 
-  timelineAudio: {
+  notesRecMetaSoft: {
+    fontSize: 12,
+    fontWeight: 800,
+    color: "#e5e7eb",
+    opacity: 0.72,
+    minHeight: 16,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+    maxWidth: "70%",
+  },
+
+  notesRecInsertBtn: {
+    padding: "6px 10px",
+    borderRadius: 8,
+    border: "1px solid rgba(148,163,184,0.25)",
+    background: "rgba(2,6,23,0.6)",
+    color: "#e5e7eb",
+    cursor: "pointer",
+    fontWeight: 900,
+    fontSize: 11,
+    whiteSpace: "nowrap",
+  },
+
+  notesRecAudio: {
     width: "100%",
     height: 28,
   },
 
-  timelineNoteBody: {
-    whiteSpace: "pre-wrap",
-    fontSize: 13,
+  notesRecSourceRow: {
+    marginTop: 6,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "flex-start",
+    gap: 8,
+  },
+
+  notesRecSourceChip: {
+    fontSize: 11,
+    fontWeight: 900,
+    padding: "2px 8px",
+    borderRadius: 999,
+    background: "rgba(148,163,184,0.18)",
     color: "#e5e7eb",
-    opacity: 0.92,
-    lineHeight: 1.35,
   },
 
   notesTextarea: {
@@ -1349,6 +1388,9 @@ const styles = {
     background: "#020617",
     color: "#fff",
     lineHeight: 1.5,
+    flex: 1,
+    minHeight: 0,
+    height: "100%",
     resize: "none",
     fontFamily: 'Arial, "Helvetica Neue", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
   },

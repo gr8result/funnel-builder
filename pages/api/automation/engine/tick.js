@@ -1,255 +1,250 @@
 // /pages/api/automation/engine/tick.js
-// FULL REPLACEMENT — multi-tenant safe + DEV send blocked unless armed
-// ✅ Adds SendGrid custom_args so webhook can tie events to flow/node/run
-// ✅ Stores sg_message_id on the run row for debugging
+<<<<<<< HEAD
+// FULL REPLACEMENT — tolerant to current_node_id vs current_node
 //
-// DEV send:
-//   POST /api/automation/engine/tick?arm=YES
-// PROD send:
-//   POST /api/automation/engine/tick?key=CRON_SECRET
+// ✅ Auth via:
+//    - header: x-cron-key: <secret>
+//    - OR Authorization: Bearer <secret>
+//    - OR query: ?key=<secret>
+// ✅ Loads members, ensures runs exist
+// ✅ Sends emails for "email" nodes (HTML from Storage)
+// ✅ Advances to next node
+// ✅ Works even if your runs table uses current_node_id OR current_node
+//
+// ENV required:
+//  - NEXT_PUBLIC_SUPABASE_URL (or SUPABASE_URL)
+//  - SUPABASE_SERVICE_ROLE_KEY (or variants)
+//  - SENDGRID_API_KEY (or GR8_MAIL_SEND_ONLY)
+//  - AUTOMATION_CRON_SECRET (or AUTOMATION_CRON_KEY / CRON_SECRET)
+=======
+// FULL REPLACEMENT — fixes TENANT_MISMATCH and makes runs use lead.user_id (source of truth)
+//
+// ✅ Auth via:
+//    - Authorization: Bearer <secret>
+//    - OR query param: ?key=<secret>
+//    - OR header: x-cron-key: <secret>
+//
+// ✅ NEVER fails just because run.user_id is wrong — repairs it to lead.user_id
+// ✅ Sends emails for "email" nodes (HTML in Supabase Storage)
+// ✅ Works whether nodes/edges stored as JSON string or object
+// ✅ Does not touch Broadcasts/Campaigns modules
+//
+// ENV required:
+//  - NEXT_PUBLIC_SUPABASE_URL (or SUPABASE_URL)
+//  - SUPABASE_SERVICE_ROLE_KEY (or SUPABASE_SERVICE_KEY / SUPABASE_SERVICE_ROLE / SUPABASE_SERVICE)
+//  - SENDGRID_API_KEY (or GR8_MAIL_SEND_ONLY)
+//  - AUTOMATION_CRON_SECRET (or AUTOMATION_CRON_KEY / CRON_SECRET)
+// Optional:
+//  - DEFAULT_FROM_EMAIL
+//  - DEFAULT_FROM_NAME
+>>>>>>> 524cfe9 (WIP: autoresponder + automation + sms fixes)
 
-import { createClient } from "@supabase/supabase-js";
 import sgMail from "@sendgrid/mail";
+import { createClient } from "@supabase/supabase-js";
 
 const SUPABASE_URL =
-  (process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL || "").trim();
+  process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL;
 
 const SERVICE_KEY =
-  (
-    process.env.SUPABASE_SERVICE_ROLE_KEY ||
-    process.env.SUPABASE_SERVICE_ROLE ||
-    process.env.SUPABASE_SERVICE_KEY ||
-    process.env.SUPABASE_SERVICE ||
-    ""
-  ).trim();
-
-const SENDGRID_API_KEY = (process.env.SENDGRID_API_KEY || "").trim();
+  process.env.SUPABASE_SERVICE_ROLE_KEY ||
+  process.env.SUPABASE_SERVICE_KEY ||
+  process.env.SUPABASE_SERVICE_ROLE ||
+  process.env.SUPABASE_SERVICE;
 
 const CRON_SECRET =
   (process.env.AUTOMATION_CRON_SECRET || "").trim() ||
   (process.env.AUTOMATION_CRON_KEY || "").trim() ||
   (process.env.CRON_SECRET || "").trim();
 
-const ARM_TOKEN = (process.env.AUTOMATION_SEND_ARM_TOKEN || "").trim();
+function getSendGridKey() {
+  return (process.env.SENDGRID_API_KEY || process.env.GR8_MAIL_SEND_ONLY || "").trim();
+<<<<<<< HEAD
+}
 
-const supabase = createClient(SUPABASE_URL, SERVICE_KEY, {
-  auth: { persistSession: false, autoRefreshToken: false },
-});
+function okAuth(req) {
+  const h = (req.headers.authorization || "").trim();
+  const bearer = h.toLowerCase().startsWith("bearer ") ? h.slice(7).trim() : "";
+  const q = (req.query.key || "").toString().trim();
+  const x = (req.headers["x-cron-key"] || "").toString().trim();
+  const secret = CRON_SECRET;
+  if (!secret) return true;
+  return bearer === secret || q === secret || x === secret;
+}
 
+function safeJson(v, fallback) {
+  if (!v) return fallback;
+  if (typeof v === "object") return v;
+  try {
+    return JSON.parse(v);
+  } catch {
+    return fallback;
+  }
+=======
+>>>>>>> 524cfe9 (WIP: autoresponder + automation + sms fixes)
+}
+
+function okAuth(req) {
+  const h = (req.headers.authorization || "").trim();
+  const bearer = h.toLowerCase().startsWith("bearer ") ? h.slice(7).trim() : "";
+  const q = (req.query.key || "").toString().trim();
+  const x = (req.headers["x-cron-key"] || "").toString().trim();
+  const secret = CRON_SECRET;
+  if (!secret) return true; // dev-safe: if no secret set, allow
+  return bearer === secret || q === secret || x === secret;
+}
+
+<<<<<<< HEAD
 function nowIso() {
   return new Date().toISOString();
 }
 
-function msg(err) {
-  return err?.message || err?.hint || err?.details || String(err || "");
+async function loadHtmlFromStorage(supabase, bucket, path) {
+  const { data, error } = await supabase.storage.from(bucket).download(path);
+  if (error || !data) throw new Error(`STORAGE_DOWNLOAD_FAILED: ${error?.message || "no data"}`);
+  return await data.text();
 }
 
-function safeJson(x, fallback) {
+function findStartNodeId(nodes, edges) {
+  const trigger = (nodes || []).find((n) => (n?.type || "").toLowerCase() === "trigger");
+  if (trigger?.id) return trigger.id;
+
+  const incoming = new Set((edges || []).map((e) => e?.target).filter(Boolean));
+  const first = (nodes || []).find((n) => n?.id && !incoming.has(n.id));
+  return first?.id || (nodes?.[0]?.id ?? null);
+}
+
+function nextFrom(nodeId, edges) {
+  const e = (edges || []).find((x) => x.source === nodeId);
+  return e?.target || null;
+}
+
+// --- DB helpers: tolerate current_node_id vs current_node
+function withCurrentNode(row, nodeId, mode) {
+  // mode: "id" => current_node_id, "name" => current_node
+  if (mode === "id") return { ...row, current_node_id: nodeId };
+  return { ...row, current_node: nodeId };
+}
+
+async function insertRunTolerant(supabase, baseRow, startNodeId) {
+  const variants = [
+    withCurrentNode(baseRow, startNodeId, "id"),
+    withCurrentNode(baseRow, startNodeId, "name"),
+  ];
+
+  let lastErr = null;
+
+  for (const row of variants) {
+    const { error } = await supabase.from("automation_flow_runs").insert(row);
+    if (!error) return { ok: true, used: row.current_node_id ? "current_node_id" : "current_node" };
+
+    const m = msg(error).toLowerCase();
+    if (m.includes("column") && m.includes("does not exist")) {
+      lastErr = error;
+      continue; // try other variant
+    }
+
+    lastErr = error;
+    break;
+=======
+function safeJson(v, fallback) {
+  if (!v) return fallback;
+  if (typeof v === "object") return v;
   try {
-    if (Array.isArray(x)) return x;
-    if (typeof x === "string") return JSON.parse(x || "[]");
-    return x ?? fallback;
+    return JSON.parse(v);
   } catch {
     return fallback;
+>>>>>>> 524cfe9 (WIP: autoresponder + automation + sms fixes)
   }
+
+  return { ok: false, error: msg(lastErr) };
 }
 
-function isProbablyHtml(s) {
-  const v = String(s || "");
-  return v.includes("<") && (v.includes("<html") || v.includes("<body") || v.includes("<div") || v.includes("<table") || v.includes("<!doctype"));
-}
+<<<<<<< HEAD
+async function selectRunsTolerant(supabase, flow_id, max) {
+  // Try select with current_node_id first, then fallback to current_node
+  const tries = [
+    "id, lead_id, user_id, current_node_id, available_at, status",
+    "id, lead_id, user_id, current_node, available_at, status",
+  ];
 
-function requireProdAuth(req) {
-  const q = String(req.query?.key || "").trim();
-  const h1 = String(req.headers["x-cron-key"] || "").trim();
-  const auth = String(req.headers.authorization || "").trim();
-  const m = auth.match(/^Bearer\s+(.+)$/i);
-  const bearer = (m?.[1] || "").trim();
+  for (const sel of tries) {
+    const { data, error } = await supabase
+      .from("automation_flow_runs")
+      .select(sel)
+      .eq("flow_id", flow_id)
+      .eq("status", "pending")
+      .lte("available_at", nowIso())
+      .limit(max);
 
-  if (q && CRON_SECRET && q === CRON_SECRET) return true;
-  if (h1 && CRON_SECRET && h1 === CRON_SECRET) return true;
-  if (bearer && CRON_SECRET && bearer === CRON_SECRET) return true;
-  return false;
-}
+    if (!error) {
+      const mode = sel.includes("current_node_id") ? "id" : "name";
+      return { ok: true, data: data || [], mode };
+    }
 
-function devIsArmed(req) {
-  const armQ = String(req.query?.arm || "").trim().toUpperCase();
-  const armH = String(req.headers["x-gr8-arm"] || "").trim().toUpperCase();
-  const armed = armQ === "YES" || armH === "YES";
-  if (!armed) return false;
-
-  if (ARM_TOKEN) {
-    const tQ = String(req.query?.arm_token || "").trim();
-    const tH = String(req.headers["x-gr8-arm-token"] || "").trim();
-    return (tQ && tQ === ARM_TOKEN) || (tH && tH === ARM_TOKEN);
+    const m = msg(error).toLowerCase();
+    if (m.includes("column") && m.includes("does not exist")) continue;
+    return { ok: false, error: msg(error) };
   }
-  return true;
+
+  return { ok: false, error: "RUNS_LOAD_FAILED: no current_node column found" };
 }
 
-function edgeNextNodeId(edges, fromId) {
-  const e = (edges || []).find((x) => String(x?.source) === String(fromId));
-  return e?.target ? String(e.target) : null;
-}
-
-function findTriggerNodeId(nodes) {
-  const t = (nodes || []).find((n) => String(n?.type || "").toLowerCase() === "trigger");
-  return t?.id ? String(t.id) : null;
-}
-
-function findNode(nodes, nodeId) {
-  return (nodes || []).find((n) => String(n?.id) === String(nodeId)) || null;
-}
-
-async function markRun(run_id, patch) {
-  const { error } = await supabase
-    .from("automation_flow_runs")
-    .update({ ...patch, updated_at: nowIso() })
-    .eq("id", run_id);
-
-  if (error) throw error;
-}
-
-function readDelayConfig(nodeData) {
-  const d = nodeData || {};
-  const nested = d.delay && typeof d.delay === "object" ? d.delay : null;
-
-  const amountRaw = nested?.amount ?? d.amount ?? d.delay_amount ?? d.value ?? 0;
-  const unitRaw = nested?.unit ?? d.unit ?? d.delayUnit ?? d.delay_unit ?? "minutes";
-
-  return { amount: Number(amountRaw || 0), unit: String(unitRaw || "minutes").toLowerCase() };
-}
-
-function delayMs(amount, unit) {
-  const a = isFinite(amount) ? amount : 0;
-  if (unit.startsWith("sec")) return a * 1000;
-  if (unit.startsWith("min")) return a * 60 * 1000;
-  if (unit.startsWith("hour")) return a * 60 * 60 * 1000;
-  if (unit.startsWith("day")) return a * 24 * 60 * 60 * 1000;
-  return a * 60 * 1000;
-}
-
-async function downloadHtmlFromStorage(nodeData) {
-  const d = nodeData || {};
-  const bucket = String(d.bucket || d.storageBucket || "email-user-assets").trim();
-
-  const path =
-    d.storagePath ||
-    d.htmlPath ||
-    d.filePath ||
-    d.objectPath ||
-    d.html_storage_path ||
-    d.html_file_path ||
-    null;
-
-  if (!path) return { ok: false, html: "", reason: "no_path" };
-
-  try {
-    const { data, error } = await supabase.storage.from(bucket).download(String(path));
-    if (error) return { ok: false, html: "", reason: msg(error) };
-
-    const buf = Buffer.from(await data.arrayBuffer());
-    return { ok: true, html: buf.toString("utf8") };
-  } catch (e) {
-    return { ok: false, html: "", reason: msg(e) };
+async function updateRunTolerant(supabase, runId, patch, currentNodeMode) {
+  // patch may include "current_node_value" special key; we convert it
+  const out = { ...patch };
+  if ("current_node_value" in out) {
+    const v = out.current_node_value;
+    delete out.current_node_value;
+    Object.assign(out, currentNodeMode === "id" ? { current_node_id: v } : { current_node: v });
   }
+
+  const { error } = await supabase.from("automation_flow_runs").update(out).eq("id", runId);
+  if (error) throw new Error(msg(error));
+=======
+async function loadHtmlFromStorage(supabase, bucket, path) {
+  const { data, error } = await supabase.storage.from(bucket).download(path);
+  if (error || !data) throw new Error(`STORAGE_DOWNLOAD_FAILED: ${error?.message || "no data"}`);
+  return await data.text();
 }
 
-async function getLeadForUser(lead_id, user_id) {
-  const { data, error } = await supabase
-    .from("leads")
-    .select("id,user_id,name,email")
-    .eq("id", lead_id)
-    .maybeSingle();
+function findStartNodeId(nodes, edges) {
+  // prefer explicit trigger node
+  const trigger = (nodes || []).find((n) => (n?.type || "").toLowerCase().includes("trigger"));
+  if (trigger?.id) return trigger.id;
 
-  if (error) throw error;
-  if (!data) return null;
-
-  if (String(data.user_id) !== String(user_id)) return { __tenant_mismatch: true, row: data };
-  return data;
+  // fallback: first node with no incoming edges
+  const incoming = new Set((edges || []).map((e) => e.target));
+  const first = (nodes || []).find((n) => !incoming.has(n.id));
+  return first?.id || (nodes?.[0]?.id ?? null);
 }
 
-async function getFlow(flow_id) {
-  const { data, error } = await supabase
-    .from("automation_flows")
-    .select("id,user_id,nodes,edges,name")
-    .eq("id", flow_id)
-    .maybeSingle();
-
-  if (error) throw error;
-  return data || null;
-}
-
-async function getAccountSenderForUser(user_id) {
-  const { data, error } = await supabase
-    .from("accounts")
-    .select(
-      [
-        "id",
-        "from_email",
-        "from_name",
-        "default_from_email",
-        "default_from_name",
-        "sender_email",
-        "sender_name",
-        "email_from",
-        "email_from_name",
-        "company_name",
-        "business_name",
-        "name",
-      ].join(",")
-    )
-    .eq("id", user_id)
-    .maybeSingle();
-
-  if (error || !data) return null;
-
-  const email =
-    (data.from_email ||
-      data.default_from_email ||
-      data.sender_email ||
-      data.email_from ||
-      "").trim();
-
-  const name =
-    (data.from_name ||
-      data.default_from_name ||
-      data.sender_name ||
-      data.email_from_name ||
-      data.company_name ||
-      data.business_name ||
-      data.name ||
-      "").trim();
-
-  if (!email) return null;
-  return { email, name: name || email };
+function nextFrom(nodeId, edges) {
+  const e = (edges || []).find((x) => x.source === nodeId);
+  return e?.target || null;
+>>>>>>> 524cfe9 (WIP: autoresponder + automation + sms fixes)
 }
 
 export default async function handler(req, res) {
-  if (req.method !== "POST") return res.status(405).json({ ok: false, error: "POST only" });
+  if (req.method !== "POST") return res.status(405).json({ ok: false, error: "Method not allowed" });
+  if (!okAuth(req)) return res.status(401).json({ ok: false, error: "Unauthorized" });
 
-  if (!SUPABASE_URL || !SERVICE_KEY) {
-    return res.status(500).json({ ok: false, error: "Missing SUPABASE_URL or SERVICE KEY env" });
-  }
-  if (!SENDGRID_API_KEY) {
-    return res.status(500).json({ ok: false, error: "Missing SENDGRID_API_KEY env" });
-  }
+  const supabase = createClient(SUPABASE_URL, SERVICE_KEY, { auth: { persistSession: false } });
 
-  const isProd = process.env.NODE_ENV === "production";
-
-  if (isProd) {
-    if (!requireProdAuth(req)) {
-      return res.status(401).json({ ok: false, error: "Unauthorized (missing/invalid cron secret)" });
-    }
-  }
-
-  const armed = isProd ? true : devIsArmed(req);
-  sgMail.setApiKey(SENDGRID_API_KEY);
+  const flow_id = (req.body?.flow_id || req.query.flow_id || "").toString().trim();
+  const max = Math.min(parseInt(req.body?.max || req.query.max || "50", 10) || 50, 200);
+  const armed = (req.query.arm || req.body?.arm || "").toString().toLowerCase() === "yes";
 
   const debug = {
-    flow_id: null,
-    max: null,
+    flow_id,
+    max,
+<<<<<<< HEAD
     now: nowIso(),
+=======
+    now: new Date().toISOString(),
+>>>>>>> 524cfe9 (WIP: autoresponder + automation + sms fixes)
     armed,
+    members_seen: 0,
+    runs_created: 0,
     picked: 0,
     processed: 0,
     sent: 0,
@@ -260,247 +255,404 @@ export default async function handler(req, res) {
   };
 
   try {
-    const flow_id = String(req.body?.flow_id || "").trim() || null;
-    const max = Math.min(Math.max(Number(req.body?.max || 50), 1), 250);
+<<<<<<< HEAD
+    if (!flow_id) return res.status(400).json({ ok: false, error: "Missing flow_id", debug });
 
-    debug.flow_id = flow_id;
-    debug.max = max;
+    const sgKey = getSendGridKey();
+    if (!sgKey) return res.status(500).json({ ok: false, error: "Missing SendGrid API key", debug });
+=======
+    if (!flow_id) {
+      return res.status(400).json({ ok: false, error: "Missing flow_id", debug });
+    }
 
-    if (!flow_id) return res.status(400).json({ ok: false, error: "flow_id required", debug });
+    const sgKey = getSendGridKey();
+    if (!sgKey) {
+      return res.status(500).json({ ok: false, error: "Missing SendGrid API key", debug });
+    }
+>>>>>>> 524cfe9 (WIP: autoresponder + automation + sms fixes)
+    sgMail.setApiKey(sgKey);
 
-    const flow = await getFlow(flow_id);
-    if (!flow?.id) return res.status(404).json({ ok: false, error: "Flow not found", debug });
+    // Load flow
+    const { data: flow, error: flowErr } = await supabase
+      .from("automation_flows")
+      .select("id, nodes, edges, name")
+      .eq("id", flow_id)
+      .single();
+
+    if (flowErr || !flow) {
+      return res.status(404).json({ ok: false, error: flowErr?.message || "Flow not found", debug });
+    }
 
     const nodes = safeJson(flow.nodes, []);
     const edges = safeJson(flow.edges, []);
+    const startNodeId = findStartNodeId(nodes, edges);
+<<<<<<< HEAD
+    if (!startNodeId) return res.status(500).json({ ok: false, error: "Flow has no start node", debug });
 
-    const triggerId = findTriggerNodeId(nodes);
-    if (!triggerId) return res.status(400).json({ ok: false, error: "Flow has no trigger node", debug });
+    // Members
+    const { data: members, error: memErr } = await supabase
+      .from("automation_flow_members")
+      .select("id, lead_id")
+=======
+    if (!startNodeId) {
+      return res.status(500).json({ ok: false, error: "Flow has no start node", debug });
+    }
 
-    const now = new Date();
-
-    const { data: runs, error: runErr } = await supabase
-      .from("automation_flow_runs")
-      .select("id,user_id,flow_id,lead_id,status,available_at,current_node_id,last_error,updated_at")
+    // Members for this flow (these are the leads you WANT to process)
+    const { data: members, error: memErr } = await supabase
+      .from("automation_flow_members")
+      .select("id, lead_id, flow_id")
+>>>>>>> 524cfe9 (WIP: autoresponder + automation + sms fixes)
       .eq("flow_id", flow_id)
-      .eq("status", "active")
-      .order("updated_at", { ascending: true })
       .limit(max);
 
-    if (runErr) throw runErr;
+    if (memErr) throw new Error(`MEMBERS_LOAD_FAILED: ${memErr.message}`);
+    debug.members_seen = members?.length || 0;
 
-    const ready = (runs || []).filter((r) => {
-      if (!r) return false;
-      if (String(r.status) !== "active") return false;
-      if (!r.available_at) return true;
-      const d = new Date(r.available_at);
-      return !isNaN(d.getTime()) && d.getTime() <= now.getTime();
-    });
+<<<<<<< HEAD
+    // Ensure a run exists per member
+    for (const m of members || []) {
+      if (!m.lead_id) continue;
 
-    debug.picked = ready.length;
+      const { data: lead, error: leadErr } = await supabase
+        .from("leads")
+        .select("id, user_id, email, name")
+=======
+    // Ensure a run exists per member (without creating wrong user_id)
+    for (const m of members || []) {
+      if (!m.lead_id) continue;
 
-    for (const run of ready) {
-      debug.processed++;
+      // get lead owner
+      const { data: lead, error: leadErr } = await supabase
+        .from("leads")
+        .select("id, user_id, email")
+>>>>>>> 524cfe9 (WIP: autoresponder + automation + sms fixes)
+        .eq("id", m.lead_id)
+        .single();
+
+      if (leadErr || !lead?.user_id) {
+        debug.errors.push(`LEAD_LOAD_FAILED ${m.lead_id}: ${leadErr?.message || "no lead/user_id"}`);
+        continue;
+      }
+<<<<<<< HEAD
+
+      // Does run exist already?
+      const { data: existing, error: exErr } = await supabase
+        .from("automation_flow_runs")
+        .select("id")
+        .eq("flow_id", flow_id)
+        .eq("lead_id", m.lead_id)
+        .maybeSingle();
+
+      if (!exErr && existing?.id) continue;
+
+      const baseRow = {
+        flow_id,
+        lead_id: m.lead_id,
+        user_id: lead.user_id, // ✅ required
+        status: "pending",
+        available_at: nowIso(),
+        last_error: null,
+      };
+
+      const ins = await insertRunTolerant(supabase, baseRow, startNodeId);
+      if (!ins.ok) debug.errors.push(`RUN_CREATE_FAILED ${m.lead_id}: ${ins.error}`);
+      else debug.runs_created += 1;
+    }
+
+    // Pick runs ready to process (tolerant select)
+    const runsOut = await selectRunsTolerant(supabase, flow_id, max);
+    if (!runsOut.ok) {
+      return res.status(500).json({ ok: false, error: `RUNS_LOAD_FAILED: ${runsOut.error}`, debug });
+    }
+
+    const runs = runsOut.data || [];
+    const currentNodeMode = runsOut.mode; // "id" or "name"
+    debug.picked = runs.length;
+
+    for (const r of runs) {
+      debug.processed += 1;
+
+      const currentNodeId = currentNodeMode === "id" ? r.current_node_id : r.current_node;
+
+      const { data: lead, error: leadErr } = await supabase
+        .from("leads")
+        .select("id, user_id, email, name")
+        .eq("id", r.lead_id)
+        .single();
+
+      if (leadErr || !lead?.email) {
+        debug.failed += 1;
+        await updateRunTolerant(supabase, r.id, {
+          status: "failed",
+          last_error: `LEAD_LOAD_FAILED: ${leadErr?.message || "missing email"}`,
+        }, currentNodeMode);
+        continue;
+      }
+
+      const node = (nodes || []).find((n) => n?.id === currentNodeId);
+      if (!node) {
+        debug.failed += 1;
+        await updateRunTolerant(supabase, r.id, {
+          status: "failed",
+          last_error: "NODE_NOT_FOUND",
+        }, currentNodeMode);
+        continue;
+      }
+
+      const nodeType = String(node.type || "").toLowerCase();
+      const nodeData = node.data || {};
 
       try {
-        if (String(flow.user_id || "") !== String(run.user_id || "")) {
-          await markRun(run.id, {
-            status: "failed",
-            last_error: `TENANT_MISMATCH: flow.user_id(${flow.user_id}) != run.user_id(${run.user_id})`,
+        if (!armed) {
+          // dry-run mode
+          await updateRunTolerant(supabase, r.id, { last_error: null }, currentNodeMode);
+          debug.notes.push(`Dry-run: would process node ${node.id} (${nodeType})`);
+          continue;
+        }
+
+        if (nodeType.includes("email")) {
+          const bucket = String(nodeData.bucket || nodeData.storage_bucket || "email-user-assets");
+          const path = String(nodeData.html_path || nodeData.storage_path || nodeData.path || "");
+
+          if (!path) throw new Error("EMAIL_NODE_MISSING_HTML_PATH");
+
+          const html = await loadHtmlFromStorage(supabase, bucket, path);
+
+          const fromEmail = (process.env.DEFAULT_FROM_EMAIL || "").trim() || "no-reply@gr8result.com";
+          const fromName = (process.env.DEFAULT_FROM_NAME || "").trim() || "GR8 RESULT";
+          const subject = String(nodeData.subject || "Check-in");
+
+          await sgMail.send({
+            to: lead.email,
+            from: { email: fromEmail, name: fromName },
+            subject,
+            html,
           });
-          debug.failed++;
-          continue;
-        }
 
-        let currentNodeId = run.current_node_id ? String(run.current_node_id) : null;
+          debug.sent += 1;
 
-        if (!currentNodeId) {
-          const next = edgeNextNodeId(edges, triggerId);
+          const next = nextFrom(node.id, edges);
           if (!next) {
-            await markRun(run.id, { status: "done", current_node_id: triggerId, last_error: null, available_at: null });
-            debug.advanced++;
-            continue;
-          }
-
-          await markRun(run.id, { current_node_id: next, last_error: null, available_at: nowIso() });
-          currentNodeId = next;
-          debug.advanced++;
-        }
-
-        const node = findNode(nodes, currentNodeId);
-        if (!node) {
-          await markRun(run.id, { status: "failed", last_error: `Node not found: ${currentNodeId}` });
-          debug.failed++;
-          continue;
-        }
-
-        const type = String(node.type || "").toLowerCase();
-
-        if (type === "delay") {
-          const { amount, unit } = readDelayConfig(node.data || {});
-          const ms = delayMs(amount, unit);
-          const nextAt = new Date(Date.now() + Math.max(ms, 0)).toISOString();
-          const nextNode = edgeNextNodeId(edges, currentNodeId);
-
-          await markRun(run.id, { current_node_id: nextNode || currentNodeId, available_at: nextAt, last_error: null });
-
-          debug.advanced++;
-          debug.notes.push(`delay:${currentNodeId} amount=${amount} unit=${unit} -> ${nextAt}`);
-          continue;
-        }
-
-        if (type === "condition") {
-          const nextNode = edgeNextNodeId(edges, currentNodeId);
-          if (!nextNode) await markRun(run.id, { status: "done", last_error: null, available_at: null });
-          else {
-            await markRun(run.id, { current_node_id: nextNode, available_at: nowIso(), last_error: null });
-            debug.advanced++;
-          }
-          continue;
-        }
-
-        if (type === "email") {
-          const lead = await getLeadForUser(run.lead_id, run.user_id);
-          if (!lead) {
-            await markRun(run.id, { status: "failed", last_error: "Lead not found" });
-            debug.failed++;
-            continue;
-          }
-          if (lead.__tenant_mismatch) {
-            await markRun(run.id, {
-              status: "failed",
-              last_error: `TENANT_MISMATCH: lead.user_id(${lead.row?.user_id}) != run.user_id(${run.user_id})`,
-            });
-            debug.failed++;
-            continue;
-          }
-
-          const toEmail = String(lead.email || "").trim();
-          if (!toEmail) {
-            await markRun(run.id, { status: "failed", last_error: "Lead has no email address" });
-            debug.failed++;
-            continue;
-          }
-
-          const d = node.data || {};
-          const subject = String(d.subject || d.emailSubject || d.title || d.label || "Automated Email").trim();
-
-          // sender
-          let fromEmail = String(d.fromEmail || d.from_email || "").trim();
-          let fromName = String(d.fromName || d.from_name || "").trim();
-
-          if (!fromEmail) {
-            const acct = await getAccountSenderForUser(run.user_id);
-            fromEmail = String(acct?.email || "").trim();
-            fromName = String(acct?.name || "").trim();
-          }
-
-          if (!fromEmail) {
-            await markRun(run.id, {
-              status: "failed",
-              last_error: "NO_SENDER_CONFIG: Provide node.data.fromEmail OR set sender fields on accounts.",
-            });
-            debug.failed++;
-            continue;
-          }
-
-          // html
-          let html = "";
-          if (typeof d.html === "string" && d.html.trim()) html = d.html;
-          else if (typeof d.htmlContent === "string" && d.htmlContent.trim()) html = d.htmlContent;
-
-          if (!html || !isProbablyHtml(html)) {
-            const dl = await downloadHtmlFromStorage(d);
-            if (dl.ok && dl.html) html = dl.html;
-          }
-
-          if (!html || !isProbablyHtml(html)) {
-            await markRun(run.id, {
-              status: "failed",
-              last_error:
-                "EMAIL_HTML_MISSING: expected node.data.html/htmlContent OR htmlPath/storagePath/etc.",
-            });
-            debug.failed++;
-            continue;
-          }
-
-          if (!armed) {
-            await markRun(run.id, { status: "failed", last_error: "DEV_SEND_BLOCKED: Not armed (?arm=YES)" });
-            debug.failed++;
-            continue;
-          }
-
-          // ✅ IMPORTANT: correlation ids
-          const emailId = String(d.emailId || d.email_id || "").trim() || null;
-
-          // send
-          let sgMessageId = null;
-          try {
-            const [resp] = await sgMail.send({
-              to: toEmail,
-              from: { email: fromEmail, name: fromName || fromEmail },
-              subject,
-              html,
-              // ✅ This is what your webhook reads as ev.custom_args
-              customArgs: {
-                provider: "sendgrid",
-                flow_id: String(flow_id),
-                node_id: String(currentNodeId),
-                run_id: String(run.id),
-                user_id: String(run.user_id),
-                lead_id: String(run.lead_id),
-                email_id: emailId || "",
-              },
-            });
-
-            // best-effort message id
-            sgMessageId = resp?.headers?.["x-message-id"] || resp?.headers?.["X-Message-Id"] || null;
-
-            debug.sent++;
-            debug.notes.push(`sent:${run.id} node=${currentNodeId} -> ${toEmail} from=${fromEmail}`);
-          } catch (e) {
-            await markRun(run.id, { status: "failed", last_error: `SendGrid send failed: ${msg(e)}` });
-            debug.failed++;
-            continue;
-          }
-
-          // store sg id (optional but VERY useful)
-          try {
-            await markRun(run.id, { last_error: null, sendgrid_message_id: sgMessageId });
-          } catch {}
-
-          // advance
-          const nextNode = edgeNextNodeId(edges, currentNodeId);
-          if (!nextNode) {
-            await markRun(run.id, { status: "done", available_at: null, last_error: null });
+            await updateRunTolerant(supabase, r.id, {
+              status: "done",
+              current_node_value: null,
+              last_error: null,
+            }, currentNodeMode);
           } else {
-            await markRun(run.id, { current_node_id: nextNode, available_at: nowIso(), last_error: null });
-            debug.advanced++;
+            await updateRunTolerant(supabase, r.id, {
+              status: "pending",
+              current_node_value: next,
+              available_at: nowIso(),
+              last_error: null,
+            }, currentNodeMode);
+            debug.advanced += 1;
           }
-          continue;
-        }
+        } else if (nodeType.includes("delay")) {
+          const minutes = parseInt(nodeData.minutes || nodeData.delay_minutes || "1", 10) || 1;
+          const when = new Date(Date.now() + minutes * 60 * 1000).toISOString();
+          const next = nextFrom(node.id, edges);
 
-        // default: advance
-        {
-          const nextNode = edgeNextNodeId(edges, currentNodeId);
-          if (!nextNode) await markRun(run.id, { status: "done", available_at: null, last_error: null });
-          else {
-            await markRun(run.id, { current_node_id: nextNode, available_at: nowIso(), last_error: null });
-            debug.advanced++;
-          }
+          await updateRunTolerant(supabase, r.id, {
+            status: next ? "pending" : "done",
+            current_node_value: next || null,
+            available_at: when,
+            last_error: null,
+          }, currentNodeMode);
+
+          debug.advanced += 1;
+        } else {
+          const next = nextFrom(node.id, edges);
+          await updateRunTolerant(supabase, r.id, {
+            status: next ? "pending" : "done",
+            current_node_value: next || null,
+            available_at: nowIso(),
+            last_error: null,
+          }, currentNodeMode);
+          debug.advanced += 1;
         }
       } catch (e) {
-        debug.errors.push(msg(e));
-        try {
-          await markRun(run.id, { status: "failed", last_error: msg(e) });
-        } catch {}
-        debug.failed++;
+        debug.failed += 1;
+        await updateRunTolerant(supabase, r.id, {
+          status: "failed",
+          last_error: String(e?.message || e),
+        }, currentNodeMode);
       }
     }
 
-    return res.json({ ok: true, debug });
+=======
+
+      // run already?
+      const { data: existing } = await supabase
+        .from("automation_flow_runs")
+        .select("id, user_id")
+        .eq("flow_id", flow_id)
+        .eq("lead_id", m.lead_id)
+        .maybeSingle();
+
+      if (!existing) {
+        const { error: insErr } = await supabase.from("automation_flow_runs").insert({
+          flow_id,
+          lead_id: m.lead_id,
+          user_id: lead.user_id, // ✅ SOURCE OF TRUTH
+          status: "pending",
+          current_node: startNodeId,
+          available_at: new Date().toISOString(),
+          last_error: null,
+        });
+
+        if (insErr) debug.errors.push(`RUN_CREATE_FAILED ${m.lead_id}: ${insErr.message}`);
+        else debug.runs_created += 1;
+      } else if (existing.user_id !== lead.user_id) {
+        // ✅ Repair wrong user_id instead of failing forever
+        const { error: upErr } = await supabase
+          .from("automation_flow_runs")
+          .update({ user_id: lead.user_id, last_error: null })
+          .eq("id", existing.id);
+
+        if (upErr) debug.errors.push(`RUN_REPAIR_FAILED ${m.lead_id}: ${upErr.message}`);
+        else debug.notes.push(`Repaired run.user_id for lead ${m.lead_id}`);
+      }
+    }
+
+    // Pick runs ready to process
+    const { data: runs, error: runErr } = await supabase
+      .from("automation_flow_runs")
+      .select("id, lead_id, user_id, current_node, available_at, status")
+      .eq("flow_id", flow_id)
+      .eq("status", "pending")
+      .lte("available_at", new Date().toISOString())
+      .limit(max);
+
+    if (runErr) throw new Error(`RUNS_LOAD_FAILED: ${runErr.message}`);
+    debug.picked = runs?.length || 0;
+
+    for (const r of runs || []) {
+      debug.processed += 1;
+
+      // Always load lead owner and enforce consistency
+      const { data: lead, error: leadErr } = await supabase
+        .from("leads")
+        .select("id, user_id, email, name")
+        .eq("id", r.lead_id)
+        .single();
+
+      if (leadErr || !lead?.email) {
+        debug.failed += 1;
+        await supabase.from("automation_flow_runs").update({
+          status: "failed",
+          last_error: `LEAD_LOAD_FAILED: ${leadErr?.message || "missing email"}`,
+        }).eq("id", r.id);
+        continue;
+      }
+
+      if (lead.user_id !== r.user_id) {
+        // repair + continue (don’t fail the flow)
+        await supabase.from("automation_flow_runs").update({
+          user_id: lead.user_id,
+          last_error: null,
+        }).eq("id", r.id);
+      }
+
+      const node = (nodes || []).find((n) => n.id === r.current_node);
+      if (!node) {
+        debug.failed += 1;
+        await supabase.from("automation_flow_runs").update({
+          status: "failed",
+          last_error: "NODE_NOT_FOUND",
+        }).eq("id", r.id);
+        continue;
+      }
+
+      const nodeType = (node.type || "").toLowerCase();
+      const nodeData = node.data || {};
+
+      try {
+        if (nodeType.includes("email")) {
+          // nodeData should contain bucket/path or a reference
+          const bucket = (nodeData.bucket || nodeData.storage_bucket || "email-user-assets").toString();
+          const path =
+            (nodeData.html_path ||
+              nodeData.storage_path ||
+              nodeData.path ||
+              "").toString();
+
+          if (!path) throw new Error("EMAIL_NODE_MISSING_HTML_PATH");
+
+          const html = await loadHtmlFromStorage(supabase, bucket, path);
+
+          // From identity — keep it simple + safe (don’t depend on accounts.company_name etc.)
+          const fromEmail =
+            (process.env.DEFAULT_FROM_EMAIL || "").trim() || "no-reply@gr8result.com";
+          const fromName =
+            (process.env.DEFAULT_FROM_NAME || "").trim() || "GR8 RESULT";
+
+          const subject = (nodeData.subject || "Check-in").toString();
+
+          await sgMail.send({
+            to: lead.email,
+            from: { email: fromEmail, name: fromName },
+            subject,
+            html,
+          });
+
+          debug.sent += 1;
+
+          // Advance to next node
+          const next = nextFrom(r.current_node, edges);
+          if (!next) {
+            await supabase.from("automation_flow_runs").update({
+              status: "done",
+              current_node: null,
+              last_error: null,
+            }).eq("id", r.id);
+          } else {
+            await supabase.from("automation_flow_runs").update({
+              status: "pending",
+              current_node: next,
+              available_at: new Date().toISOString(),
+              last_error: null,
+            }).eq("id", r.id);
+            debug.advanced += 1;
+          }
+        } else if (nodeType.includes("delay")) {
+          // delay node: wait N minutes then advance
+          const minutes = parseInt(nodeData.minutes || nodeData.delay_minutes || "1", 10) || 1;
+          const when = new Date(Date.now() + minutes * 60 * 1000).toISOString();
+          const next = nextFrom(r.current_node, edges);
+
+          await supabase.from("automation_flow_runs").update({
+            status: next ? "pending" : "done",
+            current_node: next,
+            available_at: when,
+            last_error: null,
+          }).eq("id", r.id);
+
+          debug.advanced += 1;
+        } else {
+          // unknown node: just advance
+          const next = nextFrom(r.current_node, edges);
+          await supabase.from("automation_flow_runs").update({
+            status: next ? "pending" : "done",
+            current_node: next,
+            available_at: new Date().toISOString(),
+            last_error: null,
+          }).eq("id", r.id);
+          debug.advanced += 1;
+        }
+      } catch (e) {
+        debug.failed += 1;
+        await supabase.from("automation_flow_runs").update({
+          status: "failed",
+          last_error: String(e?.message || e),
+        }).eq("id", r.id);
+      }
+    }
+
+>>>>>>> 524cfe9 (WIP: autoresponder + automation + sms fixes)
+    return res.status(200).json({ ok: true, debug });
   } catch (e) {
-    debug.errors.push(msg(e));
-    return res.status(500).json({ ok: false, error: msg(e), debug });
+    debug.errors.push(String(e?.message || e));
+    return res.status(500).json({ ok: false, error: String(e?.message || e), debug });
   }
 }

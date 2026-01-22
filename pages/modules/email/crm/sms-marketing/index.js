@@ -3,7 +3,11 @@
 // ✅ Keeps your existing structure + banner
 // ✅ Campaign queues into sms_queue (via /api/smsglobal/launch-sequence)
 // ✅ Single sends via /api/smsglobal/SMSGlobalSMSSend using lead_id OR manual to
-// ✅ Emoji picker kept
+// ✅ Emoji picker kept — NOW 2x size + stays open until you close it
+<<<<<<< HEAD
+// ✅ Emojis themselves are now BIG (about double): ~36px, bigger buttons
+=======
+>>>>>>> 524cfe9 (WIP: autoresponder + automation + sms fixes)
 
 import Head from "next/head";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -24,7 +28,8 @@ function digitsOnly(v) {
 function formatPhonePretty(raw) {
   const d = digitsOnly(raw);
   if (!d) return "";
-  if (d.length === 10 && d.startsWith("04")) return `${d.slice(0, 4)} ${d.slice(4, 7)} ${d.slice(7)}`;
+  if (d.length === 10 && d.startsWith("04"))
+    return `${d.slice(0, 4)} ${d.slice(4, 7)} ${d.slice(7)}`;
   return raw;
 }
 
@@ -71,7 +76,11 @@ async function apiPost(path, body) {
 }
 
 const DEFAULT_TEMPLATES = [
-  { id: "welcome_quick", name: "Welcome — Quick", text: "Hey, 👋 Thanks for connecting. Reply STOP to opt out." },
+  {
+    id: "welcome_quick",
+    name: "Welcome — Quick",
+    text: "Hey, 👋 Thanks for connecting. Reply STOP to opt out.",
+  },
   {
     id: "follow_up",
     name: "Follow-up",
@@ -118,24 +127,25 @@ function BannerIcon({ size = 48 }) {
   );
 }
 
-function EmojiPicker({ open, anchorRef, onPick, onClose }) {
+<<<<<<< HEAD
+// ✅ BIGGER + DOES NOT AUTO CLOSE + BIGGER EMOJI GLYPHS
+=======
+// ✅ BIGGER + DOES NOT AUTO CLOSE
+>>>>>>> 524cfe9 (WIP: autoresponder + automation + sms fixes)
+function EmojiPicker({ open, onPick, onClose }) {
   const pickerRef = useRef(null);
 
+  // Close only on ESC (NOT on outside click)
   useEffect(() => {
     if (!open) return;
 
-    function onDown(e) {
-      const p = pickerRef.current;
-      const a = anchorRef?.current;
-      const t = e.target;
-      if (p && p.contains(t)) return;
-      if (a && a.contains(t)) return;
-      onClose?.();
+    function onKey(e) {
+      if (e.key === "Escape") onClose?.();
     }
 
-    window.addEventListener("mousedown", onDown, true);
-    return () => window.removeEventListener("mousedown", onDown, true);
-  }, [open, onClose, anchorRef]);
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [open, onClose]);
 
   if (!open) return null;
 
@@ -145,34 +155,61 @@ function EmojiPicker({ open, anchorRef, onPick, onClose }) {
       style={{
         position: "absolute",
         right: 0,
-        top: "calc(100% + 8px)",
+        top: "calc(100% + 10px)",
         zIndex: 50,
-        width: 320,
-        borderRadius: 14,
+
+<<<<<<< HEAD
+        // 2x size panel
+        width: 720,
+=======
+        // 2x size
+        width: 640,
+>>>>>>> 524cfe9 (WIP: autoresponder + automation + sms fixes)
+        borderRadius: 16,
         border: "1px solid rgba(255,255,255,0.14)",
-        background: "rgba(5,10,20,0.96)",
-        boxShadow: "0 18px 50px rgba(0,0,0,0.55)",
-        padding: 10,
+        background: "rgba(5,10,20,0.98)",
+        boxShadow: "0 18px 60px rgba(0,0,0,0.65)",
+        padding: 14,
       }}
     >
-      <div style={{ color: "rgba(255,255,255,0.75)", fontSize: 14, marginBottom: 8, fontWeight: 600 }}>
-        Pick an emoji
+<<<<<<< HEAD
+      <div style={{ color: "rgba(255,255,255,0.88)", fontSize: 18, marginBottom: 10, fontWeight: 700 }}>
+        Pick emojis (stays open — press Close when done)
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(8, 1fr)", gap: 6 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(10, 1fr)", gap: 10 }}>
+=======
+      <div style={{ color: "rgba(255,255,255,0.85)", fontSize: 18, marginBottom: 10, fontWeight: 600 }}>
+        Pick emojis (stays open — press Close when done)
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(10, 1fr)", gap: 8 }}>
+>>>>>>> 524cfe9 (WIP: autoresponder + automation + sms fixes)
         {EMOJIS.map((e) => (
           <button
             key={e}
             type="button"
-            onClick={() => onPick?.(e)}
+            onClick={() => onPick?.(e)} // ✅ does NOT close
             style={{
-              height: 34,
-              borderRadius: 10,
+<<<<<<< HEAD
+              height: 64,
+              borderRadius: 16,
+              border: "1px solid rgba(255,255,255,0.12)",
+              background: "rgba(255,255,255,0.07)",
+              cursor: "pointer",
+
+              // ✅ BIG EMOJI GLYPH (double-ish)
+              fontSize: 36,
+              lineHeight: "64px",
+=======
+              height: 54,
+              borderRadius: 14,
               border: "1px solid rgba(255,255,255,0.10)",
               background: "rgba(255,255,255,0.06)",
               cursor: "pointer",
-              fontSize: 18,
-              lineHeight: "34px",
+              fontSize: 26,
+              lineHeight: "54px",
+>>>>>>> 524cfe9 (WIP: autoresponder + automation + sms fixes)
             }}
             aria-label={`emoji ${e}`}
             title={e}
@@ -187,14 +224,15 @@ function EmojiPicker({ open, anchorRef, onPick, onClose }) {
         onClick={onClose}
         style={{
           width: "100%",
-          marginTop: 10,
-          padding: "10px 12px",
-          borderRadius: 12,
-          background: "rgba(255,255,255,0.08)",
-          border: "1px solid rgba(255,255,255,0.14)",
+          marginTop: 12,
+          padding: "12px 12px",
+          borderRadius: 14,
+          background: "rgba(255,255,255,0.10)",
+          border: "1px solid rgba(255,255,255,0.16)",
           color: "#fff",
-          fontWeight: 700,
+          fontWeight: 900,
           cursor: "pointer",
+          fontSize: 16,
         }}
       >
         Close
@@ -228,7 +266,7 @@ export default function SmsMarketingPage() {
 
   const [sendingCampaign, setSendingCampaign] = useState(false);
 
-  // Single audience (copied logic from campaign; no reinvention)
+  // Single audience
   const [singleAudienceType, setSingleAudienceType] = useState("lead"); // manual | lead | list
   const [singleLeadId, setSingleLeadId] = useState("");
   const [singleListId, setSingleListId] = useState("");
@@ -240,7 +278,6 @@ export default function SmsMarketingPage() {
   // Emoji picker state
   const [emojiOpen, setEmojiOpen] = useState(false);
   const [emojiTarget, setEmojiTarget] = useState({ kind: null, index: null }); // {kind:'step'|'single', index:number|null}
-  const emojiBtnRef = useRef(null);
 
   const leadOptions = useMemo(() => {
     const arr = Array.isArray(leads) ? leads : [];
@@ -248,7 +285,8 @@ export default function SmsMarketingPage() {
       const labelParts = [];
       if (s(l?.name)) labelParts.push(s(l.name));
       if (s(l?.email)) labelParts.push(s(l.email));
-      const ph = s(l?.mobile || l?.phone);
+      // UI-only: try common phone fields; safe even if column doesn't exist
+      const ph = s(l?.phone_number || l?.mobile_phone || l?.phone || l?.mobile);
       if (ph) labelParts.push(ph);
       const label = labelParts.length ? labelParts.join(" — ") : l?.id;
       return { id: l?.id, label };
@@ -287,7 +325,7 @@ export default function SmsMarketingPage() {
         setLeads(leadArr);
         setLeadLists(listArr);
 
-        // Defaults for both campaign + single
+        // Defaults
         if (!selectedLeadId && leadArr.length) setSelectedLeadId(leadArr[0].id);
         if (!selectedListId && listArr.length) setSelectedListId(listArr[0].id);
 
@@ -322,14 +360,12 @@ export default function SmsMarketingPage() {
     setStep(i, { templateId, message: t?.text || "" });
   }
 
-  function openEmojiForStep(i, btnEl) {
-    emojiBtnRef.current = btnEl;
+  function openEmojiForStep(i) {
     setEmojiTarget({ kind: "step", index: i });
     setEmojiOpen(true);
   }
 
-  function openEmojiForSingle(btnEl) {
-    emojiBtnRef.current = btnEl;
+  function openEmojiForSingle() {
     setEmojiTarget({ kind: "single", index: null });
     setEmojiOpen(true);
   }
@@ -337,11 +373,15 @@ export default function SmsMarketingPage() {
   function handlePickEmoji(e) {
     if (emojiTarget.kind === "step" && typeof emojiTarget.index === "number") {
       const i = emojiTarget.index;
-      setStep(i, { message: (steps[i]?.message || "") + e });
+      setSteps((prev) => {
+        const next = [...prev];
+        next[i] = { ...next[i], message: (next[i]?.message || "") + e };
+        return next;
+      });
     } else if (emojiTarget.kind === "single") {
       setSingleMessage((m) => (m || "") + e);
     }
-    setEmojiOpen(false);
+    // ✅ DO NOT CLOSE HERE
   }
 
   async function startCampaign() {
@@ -381,10 +421,14 @@ export default function SmsMarketingPage() {
 
       const r = await apiPost("/api/smsglobal/launch-sequence", payload);
 
-      setBannerError(`Queued: ${r?.queued ?? 0} (recipients: ${r?.recipients ?? 0}, steps: ${r?.steps ?? 0})`);
+      setBannerError(
+        `Queued: ${r?.queued ?? 0} (recipients: ${r?.recipients ?? 0}, steps: ${r?.steps ?? 0})`
+      );
     } catch (e) {
       const detail = e?.detail?.detail || e?.detail?.message || "";
-      setBannerError(e?.message ? `Server error: ${e.message}${detail ? ` — ${detail}` : ""}` : "Server error");
+      setBannerError(
+        e?.message ? `Server error: ${e.message}${detail ? ` — ${detail}` : ""}` : "Server error"
+      );
     } finally {
       setSendingCampaign(false);
     }
@@ -398,7 +442,6 @@ export default function SmsMarketingPage() {
       const msg = s(singleMessage);
       if (!msg) throw new Error("Enter a message.");
 
-      // Same audience choices as campaign (copied, not reinvented)
       if (singleAudienceType === "lead") {
         const lead_id = s(singleLeadId);
         if (!lead_id) throw new Error("Pick a lead.");
@@ -417,7 +460,6 @@ export default function SmsMarketingPage() {
         return;
       }
 
-      // List for single = send step 1 to list immediately (uses launch-sequence with 1 step)
       if (singleAudienceType === "list") {
         const list_id = s(singleListId);
         if (!list_id) throw new Error("Pick a list.");
@@ -432,12 +474,14 @@ export default function SmsMarketingPage() {
 
       throw new Error("Invalid single audience type.");
     } catch (e) {
-      const detail =
-        e?.detail?.detail ||
-        e?.detail?.smsglobal_http ||
-        e?.detail?.message ||
-        "";
+      const detail = e?.detail?.detail || e?.detail?.smsglobal_http || e?.detail?.message || "";
+<<<<<<< HEAD
+      setBannerError(
+        e?.message ? `Server error: ${e.message}${detail ? ` — ${detail}` : ""}` : "Server error"
+      );
+=======
       setBannerError(e?.message ? `Server error: ${e.message}${detail ? ` — ${detail}` : ""}` : "Server error");
+>>>>>>> 524cfe9 (WIP: autoresponder + automation + sms fixes)
     } finally {
       setSendingSingle(false);
     }
@@ -530,7 +574,9 @@ export default function SmsMarketingPage() {
             {/* Audience row */}
             <div style={{ display: "grid", gridTemplateColumns: "220px 1fr", gap: 12, marginBottom: 12 }}>
               <div>
-                <div style={{ color: "rgba(255,255,255,0.75)", fontSize: 16, marginBottom: 6 }}>Audience</div>
+                <div style={{ color: "rgba(255,255,255,0.75)", fontSize: 16, marginBottom: 6 }}>
+                  Audience
+                </div>
                 <select
                   className="gr8Select"
                   value={audienceType}
@@ -553,7 +599,11 @@ export default function SmsMarketingPage() {
 
               <div>
                 <div style={{ color: "rgba(255,255,255,0.75)", fontSize: 16, marginBottom: 6 }}>
-                  {audienceType === "manual" ? "Phone number" : audienceType === "list" ? "Lead list" : "Select lead"}
+                  {audienceType === "manual"
+                    ? "Phone number"
+                    : audienceType === "list"
+                    ? "Lead list"
+                    : "Select lead"}
                 </div>
 
                 {audienceType === "manual" ? (
@@ -637,14 +687,18 @@ export default function SmsMarketingPage() {
                     padding: 12,
                   }}
                 >
-                  <div style={{ color: "#facc15", fontWeight: 600, marginBottom: 2 }}>Step {i + 1}</div>
+                  <div style={{ color: "#facc15", fontWeight: 600, marginBottom: 2 }}>
+                    Step {i + 1}
+                  </div>
                   <div style={{ color: "rgba(255,255,255,0.65)", fontSize: 16, marginBottom: 10 }}>
                     {i === 0 ? "Delay before step 1. Set 0 to send immediately." : `Delay after step ${i}.`}
                   </div>
 
                   <div style={{ display: "grid", gridTemplateColumns: "1fr 92px 130px", gap: 8 }}>
                     <div>
-                      <div style={{ color: "rgba(255,255,255,0.70)", fontSize: 16, marginBottom: 6 }}>Template</div>
+                      <div style={{ color: "rgba(255,255,255,0.70)", fontSize: 16, marginBottom: 6 }}>
+                        Template
+                      </div>
                       <select
                         className="gr8Select"
                         value={steps[i]?.templateId || ""}
@@ -668,7 +722,9 @@ export default function SmsMarketingPage() {
                     </div>
 
                     <div>
-                      <div style={{ color: "rgba(255,255,255,0.70)", fontSize: 16, marginBottom: 6 }}>Delay</div>
+                      <div style={{ color: "rgba(255,255,255,0.70)", fontSize: 16, marginBottom: 6 }}>
+                        Delay
+                      </div>
                       <input
                         value={String(steps[i]?.delay ?? 0)}
                         onChange={(e) => setStep(i, { delay: Number(e.target.value || 0) })}
@@ -687,7 +743,9 @@ export default function SmsMarketingPage() {
                     </div>
 
                     <div>
-                      <div style={{ color: "rgba(255,255,255,0.70)", fontSize: 16, marginBottom: 6 }}>Unit</div>
+                      <div style={{ color: "rgba(255,255,255,0.70)", fontSize: 16, marginBottom: 6 }}>
+                        Unit
+                      </div>
                       <select
                         className="gr8Select"
                         value={steps[i]?.unit || "minutes"}
@@ -716,7 +774,7 @@ export default function SmsMarketingPage() {
                       <div style={{ position: "relative" }}>
                         <button
                           type="button"
-                          onClick={(ev) => openEmojiForStep(i, ev.currentTarget)}
+                          onClick={() => openEmojiForStep(i)}
                           style={{
                             padding: "6px 10px",
                             borderRadius: 10,
@@ -732,7 +790,6 @@ export default function SmsMarketingPage() {
 
                         <EmojiPicker
                           open={emojiOpen && emojiTarget.kind === "step" && emojiTarget.index === i}
-                          anchorRef={emojiBtnRef}
                           onPick={handlePickEmoji}
                           onClose={() => setEmojiOpen(false)}
                         />
@@ -796,12 +853,14 @@ export default function SmsMarketingPage() {
               boxShadow: "0 12px 34px rgba(0,0,0,0.25)",
             }}
           >
-            <div style={{ color: "#facc15", fontWeight: 600, fontSize: 18, marginBottom: 4 }}>Single SMS</div>
+            <div style={{ color: "#facc15", fontWeight: 600, fontSize: 18, marginBottom: 4 }}>
+              Single SMS
+            </div>
             <div style={{ color: "rgba(255,255,255,0.70)", fontSize: 16, marginBottom: 12 }}>
               Use keypad + templates for quick one-off messages.
             </div>
 
-            {/* Single audience row (copied concept from campaign) */}
+            {/* Single audience row */}
             <div style={{ display: "grid", gridTemplateColumns: "160px 1fr", gap: 12, marginBottom: 12 }}>
               <div>
                 <div style={{ color: "rgba(255,255,255,0.75)", fontSize: 16, marginBottom: 6 }}>Send to</div>
@@ -904,7 +963,7 @@ export default function SmsMarketingPage() {
             </div>
 
             <div style={{ display: "grid", gridTemplateColumns: "260px 1fr", gap: 14 }}>
-              {/* Keypad (only really useful for manual mode; still available) */}
+              {/* Keypad */}
               <div
                 style={{
                   border: "1px solid rgba(255,255,255,0.10)",
@@ -983,7 +1042,7 @@ export default function SmsMarketingPage() {
                   <div style={{ position: "relative" }}>
                     <button
                       type="button"
-                      onClick={(ev) => openEmojiForSingle(ev.currentTarget)}
+                      onClick={openEmojiForSingle}
                       style={{
                         padding: "10px 12px",
                         borderRadius: 12,
@@ -999,7 +1058,6 @@ export default function SmsMarketingPage() {
 
                     <EmojiPicker
                       open={emojiOpen && emojiTarget.kind === "single"}
-                      anchorRef={emojiBtnRef}
                       onPick={handlePickEmoji}
                       onClose={() => setEmojiOpen(false)}
                     />

@@ -1,126 +1,185 @@
 // /pages/api/twilio/voice-client.js
 // FULL REPLACEMENT
 //
-// ✅ Outgoing TwiML for Twilio Voice SDK (browser dialer)
-// ✅ HARD BLOCKS inbound/self-dial loops (stops Twilio junk calls to your own virtual number)
-// ✅ Records from answer (optional)
-// ✅ recordingStatusCallback -> /api/twilio/recording-callback
+<<<<<<< HEAD
+// ✅ TwiML webhook for outgoing calls from Twilio Voice SDK
+// ✅ Always returns valid TwiML (prevents 31005 "gateway hangup")
 //
-// IMPORTANT:
-// - If Twilio hits this endpoint for INBOUND calls (to your Twilio number), we DO NOT dial anything.
-//   We just hang up (or you can redirect to voicemail later).
+// Required env:
+//  TWILIO_CALLER_ID=+61...
+=======
+// ✅ ABSOLUTE recordingStatusCallback URL (Twilio requires absolute)
+// ✅ Creates/updates crm_calls immediately (so callback can attach)
+// ✅ Passes lead_id + user_id through to callback
+// ✅ Records from answer (outbound SDK)
+// ✅ Retry-safe (upsert by twilio_sid)
 //
-// Query params supported:
-//   To=+614...
-//   lead_id=<uuid>
-//   record=1 (default true)
+// ENV optional (recommended):
+//   APP_BASE_URL=https://yourdomain.com   (or your ngrok/Cloudflare/Vercel URL)
+>>>>>>> 524cfe9 (WIP: autoresponder + automation + sms fixes)
 
-import twilio from "twilio";
+import { createClient } from "@supabase/supabase-js";
 
-function pickEnv(...keys) {
-  for (const k of keys) {
-    const v = process.env[k];
-    if (v && String(v).trim()) return String(v).trim();
-  }
-  return "";
-}
+<<<<<<< HEAD
+=======
+const SUPABASE_URL =
+  process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL;
 
-function getBaseUrl(req) {
-  const env = pickEnv(
-    "PUBLIC_BASE_URL",
-    "NEXT_PUBLIC_BASE_URL",
-    "BASE_URL",
-    "TWILIO_WEBHOOK_URL"
-  );
-  if (env) return String(env).replace(/\/+$/, "");
-  const proto = String(req.headers["x-forwarded-proto"] || "http")
-    .split(",")[0]
-    .trim();
-  const host = String(req.headers["x-forwarded-host"] || req.headers.host || "")
-    .split(",")[0]
-    .trim();
-  return `${proto}://${host}`;
-}
+const SERVICE_KEY =
+  process.env.SUPABASE_SERVICE_ROLE_KEY ||
+  process.env.SUPABASE_SERVICE_ROLE ||
+  process.env.SUPABASE_SERVICE_KEY;
 
+>>>>>>> 524cfe9 (WIP: autoresponder + automation + sms fixes)
 function s(v) {
   return String(v ?? "").trim();
 }
 
-function normalizePhone(raw) {
-  let v = s(raw);
-  if (!v) return "";
-  v = v.replace(/[^\d+]/g, "");
-  if (!v.startsWith("+") && v.startsWith("61")) v = "+" + v;
-  if (!v.startsWith("+") && v.startsWith("0") && v.length >= 9)
-    v = "+61" + v.slice(1);
-  return v;
+<<<<<<< HEAD
+function getParam(req, key) {
+  const b = req.body || {};
+  const q = req.query || {};
+  return s(b[key] ?? q[key]);
 }
 
-export default function handler(req, res) {
+function looksLikeE164(num) {
+  return /^\+\d{8,15}$/.test(num);
+=======
+function normPhone(v) {
+  return s(v).replace(/[^\d+]/g, "");
+}
+
+function getParam(req, key) {
+  const q = req.query || {};
+  const b = req.body || {};
+  return s(q[key] ?? b[key]);
+}
+
+function twiml(inner) {
+  return `<?xml version="1.0" encoding="UTF-8"?><Response>${inner}</Response>`;
+}
+
+function baseUrl(req) {
+  const envBase = s(process.env.APP_BASE_URL);
+  if (envBase) return envBase.replace(/\/+$/, "");
+  const proto =
+    s(req.headers["x-forwarded-proto"]) ||
+    (req.socket?.encrypted ? "https" : "http");
+  const host =
+    s(req.headers["x-forwarded-host"]) ||
+    s(req.headers.host) ||
+    "localhost:3000";
+  return `${proto}://${host}`.replace(/\/+$/, "");
+>>>>>>> 524cfe9 (WIP: autoresponder + automation + sms fixes)
+}
+
+export default async function handler(req, res) {
   try {
-    const VoiceResponse = twilio.twiml.VoiceResponse;
-    const twiml = new VoiceResponse();
+<<<<<<< HEAD
+    const callerId = s(process.env.TWILIO_CALLER_ID);
+    const To = getParam(req, "To") || getParam(req, "to");
+    const record = getParam(req, "record");
 
-    // ---- HARD BLOCK inbound calls hitting this endpoint ----
-    // Twilio sends Direction for inbound calls to your Twilio number.
-    // If your number's webhook / TwiML app points here, this prevents self-call loops.
-    const direction = s(req.body?.Direction || req.query?.Direction);
-    if (direction && direction.toLowerCase().includes("inbound")) {
-      twiml.say("Goodbye.");
-      twiml.hangup();
+    const vr = new twilio.twiml.VoiceResponse();
+
+    if (!callerId || !looksLikeE164(callerId)) {
+      vr.say({ voice: "alice" }, "Missing caller I D.");
+      vr.hangup();
       res.setHeader("Content-Type", "text/xml");
-      return res.status(200).send(twiml.toString());
+      return res.status(200).send(vr.toString());
     }
 
-    const toRaw = req.query?.To || req.body?.To || "";
-    const to = normalizePhone(toRaw);
-
-    const leadId = s(req.query?.lead_id || req.body?.lead_id || "");
-    const recordFlag = s(req.query?.record || req.body?.record || "1");
-    const shouldRecord = recordFlag !== "0" && recordFlag !== "false";
-
-    // Your Twilio number / caller ID (the one that MUST NOT be dialed)
-    const TWILIO_NUMBER = normalizePhone(
-      pickEnv("TWILIO_CALLER_ID", "TWILIO_FROM_NUMBER", "TWILIO_FROM", "TWILIO_PHONE_NUMBER")
-    );
-
-    // ---- VALIDATION ----
-    if (!to || !to.startsWith("+")) {
-      twiml.say("Missing or invalid destination number.");
+    if (!To || !looksLikeE164(To)) {
+      vr.say({ voice: "alice" }, "Invalid destination number.");
+      vr.hangup();
       res.setHeader("Content-Type", "text/xml");
-      return res.status(200).send(twiml.toString());
+      return res.status(200).send(vr.toString());
     }
 
-    // ---- HARD BLOCK: never dial your own Twilio number ----
-    // This is the #1 cause of the junk calls you showed (From == To == Twilio number).
-    if (TWILIO_NUMBER && normalizePhone(to) === TWILIO_NUMBER) {
-      twiml.say("Invalid destination.");
-      twiml.hangup();
-      res.setHeader("Content-Type", "text/xml");
-      return res.status(200).send(twiml.toString());
-    }
+    const dial = vr.dial({ callerId });
 
-    const baseUrl = getBaseUrl(req);
+    const wantRecord =
+      record === "1" || record === "true" || record === "yes";
 
-    const recordingCallbackUrl =
-      `${baseUrl}/api/twilio/recording-callback?` +
-      `lead_id=${encodeURIComponent(leadId || "")}&to=${encodeURIComponent(to)}`;
-
-    const dialOpts = {
-      callerId: TWILIO_NUMBER || undefined,
-      record: shouldRecord ? "record-from-answer" : undefined,
-      recordingStatusCallback: shouldRecord ? recordingCallbackUrl : undefined,
-      recordingStatusCallbackMethod: shouldRecord ? "POST" : undefined,
-      timeout: 30,
-    };
-
-    const dial = twiml.dial(dialOpts);
-    dial.number(to);
+    if (wantRecord) dial.number({ record: "record-from-answer" }, To);
+    else dial.number(To);
 
     res.setHeader("Content-Type", "text/xml");
-    return res.status(200).send(twiml.toString());
+    return res.status(200).send(vr.toString());
   } catch (e) {
     console.error("[/api/twilio/voice-client] error:", e);
-    return res.status(500).send("TwiML error");
+    const vr = new twilio.twiml.VoiceResponse();
+    vr.say({ voice: "alice" }, "Application error.");
+    vr.hangup();
+    res.setHeader("Content-Type", "text/xml");
+    return res.status(200).send(vr.toString());
+=======
+    if (!SUPABASE_URL || !SERVICE_KEY) {
+      res.setHeader("Content-Type", "text/xml");
+      return res.status(200).send(twiml("<Say>Server misconfigured.</Say>"));
+    }
+
+    const supabase = createClient(SUPABASE_URL, SERVICE_KEY, {
+      auth: { persistSession: false },
+    });
+
+    const toRaw = getParam(req, "To");
+    const to = normPhone(toRaw);
+    const leadId = getParam(req, "lead_id") || getParam(req, "leadId");
+    const userId = getParam(req, "user_id") || getParam(req, "userId");
+
+    const callSid = getParam(req, "CallSid");
+    const from = normPhone(getParam(req, "From") || getParam(req, "Caller"));
+
+    if (!to) {
+      res.setHeader("Content-Type", "text/xml");
+      return res
+        .status(200)
+        .send(twiml("<Say>Missing destination number.</Say>"));
+    }
+
+    // Create/Upsert crm_calls row NOW
+    if (callSid) {
+      await supabase.from("crm_calls").upsert(
+        {
+          twilio_sid: callSid,
+          lead_id: leadId || null,
+          user_id: userId || null,
+          direction: "outbound",
+          from_number: from || null,
+          to_number: to || null,
+          status: "in_progress",
+          unread: true,
+        },
+        { onConflict: "twilio_sid" }
+      );
+    }
+
+    const qs = new URLSearchParams();
+    if (leadId) qs.set("lead_id", leadId);
+    if (userId) qs.set("user_id", userId);
+
+    const cbAbsolute =
+      `${baseUrl(req)}/api/twilio/recording-callback` +
+      (qs.toString() ? `?${qs.toString()}` : "");
+
+    const xml =
+      `<Dial ` +
+      `record="record-from-answer" ` +
+      `recordingStatusCallback="${cbAbsolute}" ` +
+      `recordingStatusCallbackEvent="completed" ` +
+      `recordingStatusCallbackMethod="POST">` +
+      `<Number>${to}</Number>` +
+      `</Dial>`;
+
+    res.setHeader("Content-Type", "text/xml");
+    return res.status(200).send(twiml(xml));
+  } catch (e) {
+    console.error("[voice-client]", e);
+    res.setHeader("Content-Type", "text/xml");
+    return res
+      .status(200)
+      .send(twiml("<Say>Sorry, the call could not be completed.</Say>"));
+>>>>>>> 524cfe9 (WIP: autoresponder + automation + sms fixes)
   }
 }

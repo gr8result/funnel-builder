@@ -1,11 +1,9 @@
 // /pages/api/twilio/recording.js
 // FULL REPLACEMENT
 //
-// ✅ Streams a Twilio Recording as audio/mpeg so <audio> works
-// ✅ Fixes "blank player" (0:00 / 0:00) by returning actual MP3 bytes + correct headers
-//
+// Streams Twilio recording audio by Recording SID.
 // Usage:
-//   /api/twilio/recording?sid=RExxxxxxxxxxxxxxxxxxxxxxxxxxxx
+//   /api/twilio/recording?sid=RExxxx
 //
 // ENV required:
 //   TWILIO_ACCOUNT_SID
@@ -15,62 +13,48 @@ function s(v) {
   return String(v ?? "").trim();
 }
 
-function basicAuthHeader(accountSid, authToken) {
-  return "Basic " + Buffer.from(`${accountSid}:${authToken}`).toString("base64");
-}
-
 export default async function handler(req, res) {
-  if (req.method !== "GET") {
-    res.setHeader("Allow", "GET");
-    return res.status(405).end("Method not allowed");
-  }
-
   try {
-    const accountSid = s(process.env.TWILIO_ACCOUNT_SID);
-    const authToken = s(process.env.TWILIO_AUTH_TOKEN);
-    const sid = s(req.query?.sid);
-
-    if (!accountSid || !authToken) {
-      return res.status(500).end("Missing TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN");
-    }
-    if (!sid) {
-      return res.status(400).end("Missing sid");
+    if (req.method !== "GET") {
+      return res.status(405).send("Method not allowed");
     }
 
-    // Twilio recordings: fetch as MP3
-    const url = `https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(
-      accountSid
-    )}/Recordings/${encodeURIComponent(sid)}.mp3`;
+    const ACCOUNT_SID = s(process.env.TWILIO_ACCOUNT_SID);
+    const AUTH_TOKEN = s(process.env.TWILIO_AUTH_TOKEN);
+    if (!ACCOUNT_SID || !AUTH_TOKEN) {
+      return res.status(500).send("Missing TWILIO env vars");
+    }
+
+    const sid = s(req.query.sid);
+    if (!sid || !sid.startsWith("RE")) {
+      return res.status(400).send("Missing/invalid sid");
+    }
+
+    // Twilio media endpoint (MP3)
+    const url = `https://api.twilio.com/2010-04-01/Accounts/${ACCOUNT_SID}/Recordings/${encodeURIComponent(
+      sid
+    )}.mp3`;
+
+    const auth = Buffer.from(`${ACCOUNT_SID}:${AUTH_TOKEN}`).toString("base64");
 
     const r = await fetch(url, {
-      method: "GET",
       headers: {
-        Authorization: basicAuthHeader(accountSid, authToken),
+        Authorization: `Basic ${auth}`,
       },
     });
 
     if (!r.ok) {
       const txt = await r.text().catch(() => "");
-      res.status(r.status);
-      return res.end(txt || `Twilio recording fetch failed (${r.status})`);
+      return res.status(r.status).send(txt || "Failed to fetch recording");
     }
 
-    // Important: set audio headers so the browser can load duration + seek
     res.setHeader("Content-Type", "audio/mpeg");
-    res.setHeader("Cache-Control", "no-store");
+    res.setHeader("Cache-Control", "private, max-age=60");
 
-    const len = r.headers.get("content-length");
-    if (len) res.setHeader("Content-Length", len);
-
-    // Support range requests if possible (better UX). If Twilio supports it, forward it.
-    const acceptRanges = r.headers.get("accept-ranges");
-    if (acceptRanges) res.setHeader("Accept-Ranges", acceptRanges);
-
-    // Stream the bytes
-    const arrayBuffer = await r.arrayBuffer();
-    return res.status(200).send(Buffer.from(arrayBuffer));
+    const arr = Buffer.from(await r.arrayBuffer());
+    return res.status(200).send(arr);
   } catch (e) {
-    console.error("[/api/twilio/recording] error:", e);
-    return res.status(500).end(e?.message || "Recording proxy error");
+    console.error("recording proxy error:", e);
+    return res.status(500).send("Server error");
   }
 }

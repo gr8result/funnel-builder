@@ -1,103 +1,135 @@
 // /pages/api/smsglobal/send-single.js
-// FULL REPLACEMENT — Single SMS endpoint that DOES NOT require a Supabase Bearer token
+// FULL REPLACEMENT — Queue ONE SMS (Single SMS box)
 //
-// POST { to, message }
-// ✅ Uses the SAME server creds as SMSGlobalSMSSend
-// ✅ Fixes your UI error “Missing Bearer token” because we don’t require it here
+// POST JSON (any of these shapes supported):
+// - { lead_id, message }
+// - { leadId, body }
+// - { lead: { id }, message }
+// - { to, message }  (direct phone)
+// - { to_phone, body }
+//
+// ✅ Auth: Authorization: Bearer <SUPABASE ACCESS TOKEN>
+// ✅ Finds logged-in user
+// ✅ If lead provided, verifies it belongs to the user and uses leads.phone
+// ✅ Inserts into public.sms_queue WITHOUT using 'origin' column (avoids schema cache issues)
+
+import { createClient } from "@supabase/supabase-js";
+
+const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL;
+const ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY;
 
 function s(v) {
   return String(v ?? "").trim();
 }
 
-function normalizeAuE164(raw) {
-  let v = s(raw);
+function digitsOnly(v) {
+  return s(v).replace(/[^\d+]/g, "");
+}
+
+function normalizeAUTo61(raw) {
+  let v = digitsOnly(raw);
   if (!v) return "";
-  v = v.replace(/[^\d+]/g, "");
-  if (v.startsWith("+")) return v;
-  if (v.startsWith("0") && v.length >= 9 && v.length <= 11) return `+61${v.slice(1)}`;
+  if (v.startsWith("+")) v = v.slice(1);
+  if (v.startsWith("0")) v = "61" + v.slice(1);
   return v;
 }
 
-function getBasicAuth() {
-  const key =
-    s(process.env.SMSGLOBAL_API_KEY) ||
-    s(process.env.SMSGLOBAL_KEY) ||
-    s(process.env.SMSGLOBAL_USERNAME);
-
-  const secret =
-    s(process.env.SMSGLOBAL_API_SECRET) ||
-    s(process.env.SMSGLOBAL_SECRET) ||
-    s(process.env.SMSGLOBAL_PASSWORD);
-
-  if (!key || !secret) return "";
-  return `Basic ${Buffer.from(`${key}:${secret}`).toString("base64")}`;
+function getBearer(req) {
+  const a = s(req.headers.authorization);
+  if (!a.toLowerCase().startsWith("bearer ")) return "";
+  return a.slice(7).trim();
 }
 
-async function safeJson(resp) {
-  const text = await resp.text();
-  try {
-    return { json: JSON.parse(text), text };
-  } catch {
-    return { json: null, text };
-  }
+function pickLeadId(body) {
+  return (
+    s(body?.lead_id) ||
+    s(body?.leadId) ||
+    s(body?.lead?.id) ||
+    s(body?.lead?.value) ||
+    s(body?.selectedLeadId) ||
+    ""
+  );
+}
+
+function pickMessage(body) {
+  return s(body?.message) || s(body?.body) || s(body?.text) || s(body?.sms) || "";
+}
+
+function pickTo(body) {
+  return s(body?.to) || s(body?.to_phone) || s(body?.phone) || "";
 }
 
 export default async function handler(req, res) {
-  if (req.method !== "POST") return res.status(405).json({ ok: false, error: "POST only" });
+  try {
+    if (req.method !== "POST") return res.status(405).json({ ok: false, error: "Method not allowed" });
 
-  const to = normalizeAuE164(req.body?.to || req.body?.to_phone);
-  const message = s(req.body?.message || req.body?.body);
+    const token = getBearer(req);
+    if (!token) return res.status(401).json({ ok: false, error: "Missing Authorization Bearer token" });
 
-  if (!to || !message) return res.status(400).json({ ok: false, error: "Missing {to,message}" });
+    if (!SUPABASE_URL || !ANON_KEY) {
+      return res.status(500).json({ ok: false, error: "Missing Supabase env (SUPABASE_URL / SUPABASE_ANON_KEY)" });
+    }
 
-  const auth = getBasicAuth();
-  if (!auth) {
-    return res.status(500).json({
-      ok: false,
-      error: "Missing SMSGlobal credentials",
-      detail: "Set SMSGLOBAL_API_KEY and SMSGLOBAL_API_SECRET then restart server.",
+    const supabase = createClient(SUPABASE_URL, ANON_KEY, {
+      global: { headers: { Authorization: `Bearer ${token}` } },
     });
+
+    const { data: userData, error: userErr } = await supabase.auth.getUser();
+    if (userErr || !userData?.user) return res.status(401).json({ ok: false, error: "Invalid session" });
+
+    const user_id = userData.user.id;
+    const body = req.body || {};
+
+    const lead_id = pickLeadId(body);
+    const msg = pickMessage(body);
+    const directTo = pickTo(body);
+
+    if (!msg) return res.status(400).json({ ok: false, error: "Missing message/body" });
+
+    let toPhone = "";
+    let resolvedLeadId = lead_id || null;
+
+    if (directTo) {
+      toPhone = directTo;
+    } else if (lead_id) {
+      const { data: lead, error: leadErr } = await supabase
+        .from("leads")
+        .select("id, user_id, phone, name")
+        .eq("id", lead_id)
+        .maybeSingle();
+
+      if (leadErr) return res.status(500).json({ ok: false, error: leadErr.message });
+      if (!lead) return res.status(404).json({ ok: false, error: "Lead not found" });
+      if (String(lead.user_id) !== String(user_id)) {
+        return res.status(403).json({ ok: false, error: "Not allowed for this lead" });
+      }
+
+      toPhone = lead.phone || "";
+    } else {
+      return res.status(400).json({ ok: false, error: "Missing lead_id (or direct 'to' phone)" });
+    }
+
+    const to61 = normalizeAUTo61(toPhone);
+    if (!to61) return res.status(400).json({ ok: false, error: "Missing/invalid to phone" });
+
+    // Insert WITHOUT origin column to avoid schema cache/origin mismatch
+    const insertRow = {
+      user_id,
+      lead_id: resolvedLeadId,
+      to_phone: to61,
+      body: msg,
+    };
+
+    const { data: inserted, error: insErr } = await supabase
+      .from("sms_queue")
+      .insert(insertRow)
+      .select("*")
+      .single();
+
+    if (insErr) return res.status(500).json({ ok: false, error: insErr.message });
+
+    return res.status(200).json({ ok: true, queued: 1, row: inserted });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: e?.message || "Server error" });
   }
-
-  const origin =
-    s(process.env.SMSGLOBAL_ORIGIN) ||
-    s(process.env.SMSGLOBAL_FROM) ||
-    s(process.env.SMS_FROM) ||
-    "";
-
-  const url = "https://api.smsglobal.com/v2/sms/";
-  const payload = { destination: to, message, ...(origin ? { origin } : {}) };
-
-  const resp = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: auth },
-    body: JSON.stringify(payload),
-  });
-
-  const parsed = await safeJson(resp);
-
-  if (!resp.ok) {
-    return res.status(resp.status).json({
-      ok: false,
-      error: "SMSGlobal send failed",
-      detail:
-        s(parsed.json?.message) ||
-        s(parsed.json?.error) ||
-        s(parsed.json?.errors?.[0]?.message) ||
-        s(parsed.text) ||
-        `HTTP ${resp.status}`,
-      raw: parsed.json || parsed.text,
-    });
-  }
-
-  const data = parsed.json;
-  const provider_message_id =
-    data?.messages?.[0]?.id ||
-    data?.messages?.[0]?.messageId ||
-    data?.id ||
-    data?.message_id ||
-    data?.messageId ||
-    null;
-
-  return res.status(200).json({ ok: true, provider_message_id, raw: data });
 }

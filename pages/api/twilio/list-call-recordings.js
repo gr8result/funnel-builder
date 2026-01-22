@@ -1,177 +1,87 @@
 // /pages/api/twilio/list-call-recordings.js
-// NEW FILE — FULL CONTENT
+// FULL REPLACEMENT
 //
-// ✅ Lists calls + recordings directly from Twilio for a given phone number
-// ✅ Returns recordings sorted newest-first
-//
+// Returns recent Twilio recordings, optionally filtered by phone.
 // Query:
-//   /api/twilio/list-call-recordings?phone=+61412345678&limit=50
+//   ?phone=+614...   (optional, best effort filter)
+//   ?limit=50        (optional)
 //
 // ENV required:
 //   TWILIO_ACCOUNT_SID
 //   TWILIO_AUTH_TOKEN
-//
-// Response:
-//   { ok: true, recordings: [{ sid, callSid, dateCreated, duration, direction, from, to }] }
+
+import twilio from "twilio";
 
 function s(v) {
   return String(v ?? "").trim();
 }
 
-function toInt(v, def) {
-  const n = Number(v);
-  if (!Number.isFinite(n) || n <= 0) return def;
-  return Math.floor(n);
-}
-
-function basicAuthHeader(accountSid, authToken) {
-  return "Basic " + Buffer.from(`${accountSid}:${authToken}`).toString("base64");
-}
-
-async function twilioGetJson(url, accountSid, authToken) {
-  const r = await fetch(url, {
-    method: "GET",
-    headers: {
-      Authorization: basicAuthHeader(accountSid, authToken),
-      Accept: "application/json",
-    },
-  });
-
-  const text = await r.text().catch(() => "");
-  let json = null;
-  try {
-    json = text ? JSON.parse(text) : null;
-  } catch {
-    json = null;
-  }
-
-  if (!r.ok) {
-    const msg =
-      (json && (json.message || json.error)) ||
-      text ||
-      `Twilio request failed (${r.status})`;
-    const err = new Error(msg);
-    err.status = r.status;
-    err.detail = json || text;
-    throw err;
-  }
-
-  return json || {};
-}
-
-function normalizePhoneLoose(raw) {
-  // keep + and digits only; Twilio expects E.164-ish
-  return s(raw).replace(/[^\d+]/g, "");
+function normalizePhone(v) {
+  const x = s(v).replace(/[^\d+]/g, "");
+  if (!x) return "";
+  // If AU local 04... -> +61...
+  if (!x.startsWith("+") && x.startsWith("0") && x.length >= 9) return "+61" + x.slice(1);
+  if (!x.startsWith("+") && x.startsWith("61")) return "+" + x;
+  return x;
 }
 
 export default async function handler(req, res) {
-  if (req.method !== "GET") {
-    res.setHeader("Allow", "GET");
-    return res.status(405).json({ ok: false, error: "Method not allowed" });
-  }
-
   try {
-    const accountSid = s(process.env.TWILIO_ACCOUNT_SID);
-    const authToken = s(process.env.TWILIO_AUTH_TOKEN);
+    if (req.method !== "GET") {
+      return res.status(405).json({ ok: false, error: "Method not allowed" });
+    }
 
-    if (!accountSid || !authToken) {
-      return res.status(500).json({
-        ok: false,
-        error: "Missing TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN",
+    const ACCOUNT_SID = s(process.env.TWILIO_ACCOUNT_SID);
+    const AUTH_TOKEN = s(process.env.TWILIO_AUTH_TOKEN);
+    if (!ACCOUNT_SID || !AUTH_TOKEN) {
+      return res.status(500).json({ ok: false, error: "Missing TWILIO env vars" });
+    }
+
+    const client = twilio(ACCOUNT_SID, AUTH_TOKEN);
+
+    const limitRaw = Number(req.query.limit ?? 50);
+    const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 100) : 50;
+
+    const phoneQ = normalizePhone(req.query.phone);
+
+    // Recordings list (no direct phone filter available reliably),
+    // so we fetch recent recordings then fetch their call details to match phone.
+    const recs = await client.recordings.list({ limit });
+
+    // Fetch call details for each recording (so we can return from/to and filter by phone)
+    const out = [];
+    for (const r of recs) {
+      let call = null;
+      try {
+        if (r.callSid) call = await client.calls(r.callSid).fetch();
+      } catch {
+        call = null;
+      }
+
+      const from = call?.from || "";
+      const to = call?.to || "";
+
+      // Best-effort phone filter
+      if (phoneQ) {
+        const nf = normalizePhone(from);
+        const nt = normalizePhone(to);
+        if (phoneQ !== nf && phoneQ !== nt) continue;
+      }
+
+      out.push({
+        sid: r.sid, // Recording SID (RE...)
+        recordingSid: r.sid,
+        callSid: r.callSid || "",
+        dateCreated: r.dateCreated || null,
+        duration: r.duration != null ? Number(r.duration) : null,
+        from,
+        to,
       });
     }
 
-    const phoneRaw = s(req.query?.phone);
-    const phone = normalizePhoneLoose(phoneRaw);
-    const limit = Math.min(200, toInt(req.query?.limit, 50));
-
-    if (!phone) {
-      return res.status(400).json({ ok: false, error: "Missing phone" });
-    }
-
-    const base = `https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(
-      accountSid
-    )}`;
-
-    // Twilio only filters by To or From separately
-    const callsToUrl = `${base}/Calls.json?To=${encodeURIComponent(
-      phone
-    )}&PageSize=${encodeURIComponent(Math.min(100, limit))}`;
-
-    const callsFromUrl = `${base}/Calls.json?From=${encodeURIComponent(
-      phone
-    )}&PageSize=${encodeURIComponent(Math.min(100, limit))}`;
-
-    const [callsTo, callsFrom] = await Promise.all([
-      twilioGetJson(callsToUrl, accountSid, authToken).catch(() => ({ calls: [] })),
-      twilioGetJson(callsFromUrl, accountSid, authToken).catch(() => ({ calls: [] })),
-    ]);
-
-    const mapBySid = new Map();
-    for (const c of [...(callsTo.calls || []), ...(callsFrom.calls || [])]) {
-      if (c && c.sid) mapBySid.set(c.sid, c);
-    }
-
-    const calls = Array.from(mapBySid.values());
-
-    calls.sort((a, b) => {
-      const ta = Date.parse(a.start_time || a.date_created || "") || 0;
-      const tb = Date.parse(b.start_time || b.date_created || "") || 0;
-      return tb - ta;
-    });
-
-    const out = [];
-
-    for (const call of calls.slice(0, limit)) {
-      const callSid = s(call.sid);
-      if (!callSid) continue;
-
-      const recUrl = `${base}/Calls/${encodeURIComponent(
-        callSid
-      )}/Recordings.json?PageSize=50`;
-
-      let recJson = null;
-      try {
-        recJson = await twilioGetJson(recUrl, accountSid, authToken);
-      } catch {
-        recJson = { recordings: [] };
-      }
-
-      const recs = Array.isArray(recJson?.recordings) ? recJson.recordings : [];
-      for (const r of recs) {
-        const sid = s(r?.sid);
-        if (!sid) continue;
-
-        out.push({
-          sid,
-          callSid,
-          dateCreated: r?.date_created || call?.start_time || call?.date_created || null,
-          duration:
-            r?.duration != null
-              ? Number(r.duration)
-              : call?.duration != null
-              ? Number(call.duration)
-              : null,
-          direction: call?.direction || null,
-          from: call?.from || null,
-          to: call?.to || null,
-        });
-      }
-    }
-
-    out.sort((a, b) => {
-      const ta = Date.parse(a.dateCreated || "") || 0;
-      const tb = Date.parse(b.dateCreated || "") || 0;
-      return tb - ta;
-    });
-
-    res.setHeader("Cache-Control", "no-store");
-    return res.status(200).json({ ok: true, phone, recordings: out.slice(0, limit) });
+    return res.status(200).json({ ok: true, recordings: out });
   } catch (e) {
-    console.error("[list-call-recordings] error:", e);
-    return res.status(500).json({
-      ok: false,
-      error: e?.message || "Failed to list call recordings",
-    });
+    console.error("list-call-recordings error:", e);
+    return res.status(500).json({ ok: false, error: e?.message || "Server error" });
   }
 }
