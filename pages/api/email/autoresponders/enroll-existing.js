@@ -162,8 +162,7 @@ export default async function handler(req, res) {
 
     toInsert.push({
       user_id: user.id,
-<<<<<<< HEAD
-      autoresponder_id,
+
       list_id,
       lead_id: null, // we are using email_list_members, not CRM lead_id
       to_email: m.to_email,
@@ -172,7 +171,7 @@ export default async function handler(req, res) {
       template_path: s(ar.template_path),
       scheduled_at: now,
       status: "queued",
-=======
+
       autoresponder_id: autoresponderId,
       list_id: listId,
       lead_id: m.lead_id,
@@ -182,7 +181,7 @@ export default async function handler(req, res) {
       template_path: ar.template_path,
       scheduled_at: scheduledAt,
       status: "pending",
->>>>>>> 524cfe9 (WIP: autoresponder + automation + sms fixes)
+
       attempts: 0,
       last_error: null,
       provider_message_id: null,
