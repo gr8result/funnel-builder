@@ -84,6 +84,26 @@ export default async function handler(req, res) {
             stripe_session_id: session.id,
           },
         });
+
+        // 4) Trigger automation flows with purchase_completed trigger
+        try {
+          await fetch(
+            `${process.env.NEXT_PUBLIC_SITE_URL || "http://localhost:3000"}/api/automation/webhook/purchase-completed`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                lead_id: appContactId,
+                email: session.customer_email || session.customer_details?.email,
+                order_id: session.id,
+                amount: amountCents / 100,
+              }),
+            }
+          );
+        } catch (webhookErr) {
+          console.error("Error calling purchase-completed webhook:", webhookErr);
+          // Don't fail the main webhook if automation fails
+        }
       }
     } catch (err) {
       console.error("Error handling store checkout.session.completed:", err);
