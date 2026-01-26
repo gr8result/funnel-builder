@@ -24,9 +24,15 @@ const SUPABASE_URL =
   process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL;
 const SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-const supabase = createClient(SUPABASE_URL, SERVICE_KEY, {
-  auth: { persistSession: false },
-});
+if (!SUPABASE_URL || !SERVICE_KEY) {
+  console.error("Missing required environment variables: SUPABASE_URL and/or SUPABASE_SERVICE_ROLE_KEY");
+}
+
+const supabase = SUPABASE_URL && SERVICE_KEY 
+  ? createClient(SUPABASE_URL, SERVICE_KEY, {
+      auth: { persistSession: false },
+    })
+  : null;
 
 function extractLeadInfo(body) {
   // Direct format
@@ -103,6 +109,14 @@ export default async function handler(req, res) {
   try {
     if (req.method !== "POST") {
       return res.status(405).json({ ok: false, error: "POST only" });
+    }
+
+    if (!supabase) {
+      return res.status(500).json({
+        ok: false,
+        error: "Server configuration error: Missing Supabase credentials",
+        debug,
+      });
     }
 
     // Extract lead info from webhook payload
