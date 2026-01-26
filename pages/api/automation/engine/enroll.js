@@ -5,7 +5,7 @@
 // ✅ Uses leads.user_id (auth.users.id) as the ONLY correct user_id for:
 //    - automation_flow_members.user_id
 //    - automation_flow_runs.user_id
-// ✅ Supports list_subscribed / lead_created / crm_sent event matching
+// ✅ Supports list_subscribed / lead_created / crm_sent / purchase_completed event matching
 // ✅ Handles your mixed ownership model:
 //    - automation_flows.user_id is accounts.id (NOT auth uid)
 //    - leads.user_id is auth.users.id
@@ -21,7 +21,10 @@
 // 3) CRM send (manual):
 //    { lead_id, event: "crm_sent" }
 //
-// 4) Forced enrollment to a flow:
+// 4) Purchase completed:
+//    { lead_id, event: "purchase_completed" }
+//
+// 5) Forced enrollment to a flow:
 //    { lead_id, flow_id, event: "manual" }
 
 import { createClient } from "@supabase/supabase-js";
@@ -194,6 +197,7 @@ function flowMatchesEvent(flow, { event, list_id }) {
 
   if (e === "lead_created") return t === "lead_created";
   if (e === "crm_sent") return t === "crm_sent";
+  if (e === "purchase_completed") return t === "purchase_completed";
 
   return false;
 }

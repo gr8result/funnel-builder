@@ -56,6 +56,7 @@ export default function TriggerNodeDrawer({ node, onSave, onClose }) {
             <option value="lead_created">Lead Created</option>
             <option value="list_added">Added to List</option>
             <option value="tag_added">Tag Added</option>
+            <option value="purchase_completed">Purchase Completed</option>
             <option value="custom_event">Custom Event</option>
           </select>
 
