@@ -14,7 +14,7 @@
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/router";
-import { supabase } from "../../utils/supabase-client";
+import { supabase } from "../../../utils/supabase-client";
 import LeadInfoCard from "./LeadInfoCard";
 import BrowserDialer from "../telephony/BrowserDialer";
 import SendToAutomationPanel from "./SendToAutomationPanel";
@@ -1677,3 +1677,4 @@ const styles = {
     cursor: "se-resize",
   },
 };
+
