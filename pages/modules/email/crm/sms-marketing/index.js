@@ -486,28 +486,22 @@ export default function SmsMarketingPage() {
       const msg = s(singleMessage);
       if (!msg) throw new Error("Enter a message.");
 
-      // ✅ Queue via send-single endpoint (auto-flushes)
+      // ✅ correct route is /api/smsglobal/SMSSend
       if (singleAudienceType === "lead") {
         const lead_id = s(singleLeadId);
         if (!lead_id) throw new Error("Pick a lead.");
-        const r = await apiPost("/api/smsglobal/send-single", { lead_id, message: msg });
-        if (r?.ok) {
-          const sent = r?.auto_flush?.sent || 0;
-          setBannerError(`Queued + ${sent > 0 ? 'Sent' : 'Queuing for send'}`);
-          setSingleMessage("");
-        }
+        const r = await apiPost("/api/smsglobal/SMSSend", { lead_id, message: msg });
+        setBannerError(`Sent OK (provider_id: ${r?.provider_id || "-"})`);
+        setSingleMessage("");
         return;
       }
 
       if (singleAudienceType === "manual") {
         const to = normalizePhoneForSend(singleManualPhone);
         if (!to) throw new Error("Enter a phone number.");
-        const r = await apiPost("/api/smsglobal/send-single", { to, message: msg });
-        if (r?.ok) {
-          const sent = r?.auto_flush?.sent || 0;
-          setBannerError(`Queued + ${sent > 0 ? 'Sent' : 'Queuing for send'}`);
-          setSingleMessage("");
-        }
+        const r = await apiPost("/api/smsglobal/SMSSend", { to, message: msg });
+        setBannerError(`Sent OK (provider_id: ${r?.provider_id || "-"})`);
+        setSingleMessage("");
         return;
       }
 

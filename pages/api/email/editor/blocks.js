@@ -1,1 +1,0 @@
-export function makeBlock(type){ if(typeof document !== "undefined"){ const el = document.createElement("div"); el.setAttribute("data-gr8-block",type); el.textContent = type; return el; } return {type}; } export function findInsertionPoint(){ return {lineY:0,ref:null,before:false}; }
