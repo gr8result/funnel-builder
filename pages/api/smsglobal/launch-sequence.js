@@ -1,45 +1,27 @@
 // /pages/api/smsglobal/launch-sequence.js
 // FULL REPLACEMENT
 //
-<<<<<<< HEAD
-// ✅ FIXES:
-// - NO sms_queue inserts (so your missing columns + schema cache errors are gone)
-// - Lead phone lookup cannot crash on missing columns (select('*'))
-// - Uses SMSGlobal HTTP API scheduling via scheduledatetime (fixes 403 + queue failures)
+// ✅ Supports audience.type: 'lead' | 'manual' | 'list'
+// ✅ Robust lead phone picking (doesn't assume column names)
+// ✅ Robust sms_queue insert (tries multiple column name variants automatically)
+// ✅ Multi-tenant safe for 'lead' (checks common ownership fields)
+// ✅ Uses service role for inserts
 //
-// Expected body from UI (we support multiple shapes):
-// {
-//   lead_id: "uuid",
-//   steps: [
-//     { text: "msg1", delay: 0, unit: "minutes" },
-//     { text: "msg2", delay: 1, unit: "minutes" },
-//     { text: "msg3", delay: 1, unit: "minutes" }
-//   ],
-//   from: optional
-// }
+// UI payload supported:
+//  {
+//    audience: { type:'lead', lead_id } OR { type:'manual', phone } OR { type:'list', list_id },
+//    steps: [{ delay, unit, message }...] (max 3)
+//  }
 //
-// ENV REQUIRED:
-//   SMSGLOBAL_USERNAME
-//   SMSGLOBAL_PASSWORD
-//   SMSGLOBAL_FROM
-// Optional:
-//   NEXT_PUBLIC_SUPABASE_URL
-//   SUPABASE_SERVICE_ROLE_KEY
-=======
-// Fixes:
-// ✅ NO more "column leads.mobile does not exist" (uses select("*"))
-// ✅ Inserts into public.sms_queue using YOUR columns: user_id, lead_id, step_no, to_phone, body
-// ✅ Multi-tenant: only reads leads belonging to logged-in user (leads.user_id = auth user.id)
-// ✅ Accepts UI payload: { audience:{type:'lead', lead_id}, steps:[{delay,unit,message}...] }
-//
-// NOTE:
-// - This endpoint ONLY enqueues. Sending is handled by your flush worker (/api/smsglobal/flush-queue).
->>>>>>> 524cfe9 (WIP: autoresponder + automation + sms fixes)
+// NOTE: This endpoint ENQUEUES. Your sender/worker should flush sms_queue.
 
 import { createClient } from "@supabase/supabase-js";
 
 const SUPABASE_URL =
   process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL;
+
+const ANON_KEY =
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY;
 
 const SERVICE_KEY =
   process.env.SUPABASE_SERVICE_ROLE_KEY ||
@@ -51,238 +33,33 @@ function s(v) {
   return String(v ?? "").trim();
 }
 
-<<<<<<< HEAD
-function normalizeSmsGlobalNumber(input) {
-  let v = s(input);
-  if (!v) return "";
-  v = v.replace(/[^\d+]/g, "");
-  if (v.startsWith("+")) v = v.slice(1);
-  if (v.startsWith("0") && v.length >= 9) v = "61" + v.slice(1);
-  return v;
-}
-
-function pickLeadPhone(lead) {
-  if (!lead || typeof lead !== "object") return "";
-  const candidates = [
-    lead.phone_number,
-    lead.phone,
-    lead.mobile,
-    lead.mobile_phone,
-    lead.mobileNumber,
-    lead.phoneNumber,
-    lead.cell,
-    lead.cell_phone,
-    lead.tel,
-    lead.telephone,
-  ]
-    .map((x) => s(x))
-    .filter(Boolean);
-
-  return candidates[0] || "";
-}
-
-function minutesFromDelay(delay, unit) {
-  const d = Number(delay || 0);
-  const u = s(unit || "minutes").toLowerCase();
-
-  if (!d || d <= 0) return 0;
-
-  if (u.startsWith("min")) return d;
-  if (u.startsWith("hour")) return d * 60;
-  if (u.startsWith("day")) return d * 60 * 24;
-
-  // fallback
-  return d;
-}
-
-function formatAedtDatetime(dateObj) {
-  // SMSGlobal doc says scheduledatetime must be "yyyy-mm-dd hh:mm:ss" and in AEDT.
-  // We can’t reliably convert timezone without libs, so we do:
-  // - If you are in AU and server is in AU, this will be correct.
-  // - If server is UTC (Vercel), scheduled time will be offset.
-  // For reliability, we schedule using absolute minutes from NOW on the server.
-  const pad = (n) => String(n).padStart(2, "0");
-  const yyyy = dateObj.getFullYear();
-  const mm = pad(dateObj.getMonth() + 1);
-  const dd = pad(dateObj.getDate());
-  const hh = pad(dateObj.getHours());
-  const mi = pad(dateObj.getMinutes());
-  const ss = pad(dateObj.getSeconds());
-  return `${yyyy}-${mm}-${dd} ${hh}:${mi}:${ss}`;
-}
-
-async function sendViaSmsGlobalHttp({ to, text, from, scheduledatetime }) {
-  const user = s(process.env.SMSGLOBAL_USERNAME);
-  const password = s(process.env.SMSGLOBAL_PASSWORD);
-  const sender = s(from || process.env.SMSGLOBAL_FROM);
-
-  if (!user || !password) {
-    return {
-      ok: false,
-      status: 500,
-      error:
-        "Missing SMSGLOBAL_USERNAME or SMSGLOBAL_PASSWORD in env. Set them and retry.",
-    };
-  }
-  if (!sender) {
-    return {
-      ok: false,
-      status: 500,
-      error:
-        "Missing SMSGLOBAL_FROM in env. Set it to your sender ID (NO '+') and retry.",
-    };
-  }
-
-  const cleanTo = normalizeSmsGlobalNumber(to);
-  const cleanText = s(text);
-
-  if (!cleanTo) return { ok: false, status: 400, error: "Missing/invalid to." };
-  if (!cleanText) return { ok: false, status: 400, error: "Empty message." };
-
-  const params = new URLSearchParams();
-  params.set("action", "sendsms");
-  params.set("user", user);
-  params.set("password", password);
-
-  const cleanFrom = normalizeSmsGlobalNumber(sender);
-  params.set("from", cleanFrom || sender);
-  params.set("to", cleanTo);
-  params.set("text", cleanText);
-
-  if (scheduledatetime) params.set("scheduledatetime", scheduledatetime);
-
-  const url = `https://api.smsglobal.com/http-api.php?${params.toString()}`;
-
-  const r = await fetch(url, { method: "GET" });
-  const bodyText = await r.text();
-  const ok = bodyText.startsWith("OK:") || bodyText.startsWith("SMSGLOBAL");
-
-  return { ok, status: r.status, provider_raw: bodyText };
-}
-
-export default async function handler(req, res) {
-  try {
-    if (req.method !== "POST") {
-      res.setHeader("Allow", ["POST"]);
-      return res.status(405).json({ ok: false, error: "Method not allowed" });
-    }
-
-    const body = req.body || {};
-    const lead_id = body.lead_id || body.leadId || body.selectedLeadId;
-    const from = body.from;
-
-    // steps can come in different shapes depending on your UI
-    const stepsInput =
-      body.steps ||
-      body.sequence ||
-      [
-        body.step1 && { ...body.step1 },
-        body.step2 && { ...body.step2 },
-        body.step3 && { ...body.step3 },
-      ].filter(Boolean);
-
-    const steps = Array.isArray(stepsInput) ? stepsInput : [];
-
-    if (!lead_id) {
-      return res
-        .status(400)
-        .json({ ok: false, error: "Missing lead_id" });
-    }
-    if (!steps.length) {
-      return res
-        .status(400)
-        .json({ ok: false, error: "No steps provided" });
-    }
-    if (!SUPABASE_URL || !SERVICE_KEY) {
-      return res.status(500).json({
-        ok: false,
-        error:
-          "Missing SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY. Needed for lead lookup.",
-      });
-    }
-
-    const supabase = createClient(SUPABASE_URL, SERVICE_KEY, {
-      auth: { persistSession: false },
-    });
-
-    const { data: lead, error: leadErr } = await supabase
-      .from("leads")
-      .select("*")
-      .eq("id", lead_id)
-      .single();
-
-    if (leadErr) {
-      return res.status(500).json({
-        ok: false,
-        error: `Lead lookup failed: ${leadErr.message}`,
-      });
-    }
-
-    const to = pickLeadPhone(lead);
-    if (!to) {
-      return res.status(400).json({
-        ok: false,
-        error:
-          "This lead has no phone number in any known phone fields (phone/mobile/etc).",
-      });
-    }
-
-    // Build schedule: Step1 delay is relative to NOW; Step2 is relative to Step1; Step3 relative to Step2
-    const now = new Date();
-    let cumulativeMinutes = 0;
-
-    const results = [];
-
-    for (let i = 0; i < steps.length; i++) {
-      const st = steps[i] || {};
-      const text = s(st.message || st.text || st.body);
-      const delay = st.delay ?? st.wait ?? st.delayValue ?? 0;
-      const unit = st.unit ?? st.delayUnit ?? "minutes";
-
-      const addMins = minutesFromDelay(delay, unit);
-      cumulativeMinutes += addMins;
-
-      let scheduledatetime = null;
-      if (cumulativeMinutes > 0) {
-        const when = new Date(now.getTime() + cumulativeMinutes * 60 * 1000);
-        scheduledatetime = formatAedtDatetime(when);
-      }
-
-      const out = await sendViaSmsGlobalHttp({
-        to,
-        text,
-        from,
-        scheduledatetime,
-      });
-
-      results.push({
-        step: i + 1,
-        scheduledatetime: scheduledatetime || "immediate",
-        ok: out.ok,
-        status: out.status,
-        provider_raw: out.provider_raw,
-      });
-
-      if (!out.ok) {
-        return res.status(500).json({
-          ok: false,
-          error: `SMSGlobal send failed on step ${i + 1}`,
-          results,
-        });
-      }
-    }
-
-    return res.status(200).json({
-      ok: true,
-      provider: "smsglobal_http",
-      to: normalizeSmsGlobalNumber(to),
-      results,
-    });
-  } catch (e) {
-    return res.status(500).json({ ok: false, error: e?.message || String(e) });
-=======
 function json(res, status, body) {
   return res.status(status).json(body);
+}
+
+function digitsOnly(v) {
+  return s(v).replace(/[^\d]/g, "");
+}
+
+function normalizePhoneForSend(raw) {
+  const t = s(raw);
+  if (!t) return "";
+  
+  // Strip everything but digits and +
+  let v = t.replace(/[^\d+]/g, "");
+  if (!v) return "";
+  
+  // Strip leading + if present
+  if (v.startsWith("+")) v = v.slice(1);
+  
+  // Convert 0XXXXXXXXX to 61XXXXXXXXX (AU)
+  if (v.startsWith("0") && v.length >= 9) v = "61" + v.slice(1);
+  
+  // Ensure it starts with 61 for AU numbers without explicit country code
+  if (!v.startsWith("61") && /^\d{9,}$/.test(v)) v = "61" + v;
+  
+  // SMSGlobal v2 API expects format without + (e.g., 61417004315)
+  return v;
 }
 
 async function getUserFromBearer(req, supabaseAnon) {
@@ -298,7 +75,6 @@ async function getUserFromBearer(req, supabaseAnon) {
 function pickLeadPhone(leadRow) {
   if (!leadRow || typeof leadRow !== "object") return "";
 
-  // Try lots of common field names. (We do NOT assume your schema.)
   const candidates = [
     leadRow.to_phone,
     leadRow.phone,
@@ -310,32 +86,213 @@ function pickLeadPhone(leadRow) {
     leadRow.sms,
     leadRow.sms_phone,
     leadRow.contact_number,
+    leadRow.contact_phone,
+    leadRow.primary_phone,
+    leadRow.tel,
+    leadRow.telephone,
   ];
 
   for (const c of candidates) {
     const v = s(c);
     if (v) return v;
   }
-
   return "";
+}
+
+function isOwnedByUser(lead, userId) {
+  if (!lead || typeof lead !== "object") return false;
+
+  // Prefer explicit ownership fields if they exist
+  const checks = [
+    lead.user_id,
+    lead.owner_id,
+    lead.created_by,
+    lead.profile_id,
+    lead.account_user_id,
+  ].map((x) => s(x));
+
+  // If any of these fields exist and match, accept
+  for (const v of checks) {
+    if (v && v === s(userId)) return true;
+  }
+
+  // If the table doesn’t have any of those fields populated,
+  // we refuse (safer than leaking / sending to other tenant)
+  const hasAnyOwnershipField = checks.some((v) => v.length > 0);
+  if (!hasAnyOwnershipField) return false;
+
+  return false;
+}
+
+function unitToMinutes(unit) {
+  const u = s(unit).toLowerCase();
+  if (u === "days") return 24 * 60;
+  if (u === "hours") return 60;
+  return 1; // minutes default
+}
+
+// --- LIST MEMBERSHIP LOOKUP (tries a few common tables) ---
+async function getLeadIdsForList(supabaseAdmin, listId) {
+  const lid = s(listId);
+  if (!lid) return [];
+
+  const attempts = [
+    { table: "lead_list_members", leadCol: "lead_id", listCol: "list_id" },
+    { table: "lead_lists_members", leadCol: "lead_id", listCol: "list_id" },
+    { table: "email_list_members", leadCol: "lead_id", listCol: "list_id" },
+    { table: "lead_list_memberships", leadCol: "lead_id", listCol: "list_id" },
+  ];
+
+  for (const a of attempts) {
+    try {
+      const { data, error } = await supabaseAdmin
+        .from(a.table)
+        .select(a.leadCol)
+        .eq(a.listCol, lid)
+        .limit(50000);
+
+      if (!error && Array.isArray(data)) {
+        const ids = data.map((r) => s(r?.[a.leadCol])).filter(Boolean);
+        if (ids.length) return Array.from(new Set(ids));
+        return [];
+      }
+      // if relation missing or other error, try next
+    } catch {
+      // try next
+    }
+  }
+
+  // If you use a different membership table, add it above.
+  return [];
+}
+
+// --- SMS QUEUE INSERT (tries multiple column variants until one works) ---
+function buildInsertVariants({
+  user_id,
+  lead_id,
+  step_no,
+  to_phone,
+  body,
+  send_at_iso,
+  scheduled_for,
+  available_at,
+  status,
+}) {
+  // We will try these shapes in order until one inserts without "column does not exist" errors.
+  // Your sms_queue schema has: id, user_id, lead_id, step_no, to_phone, body, scheduled_for, status, 
+  // provider_message_id, error, created_at, updated_at, origin, available_at, provider_id, last_error
+  return [
+    // Variant A (matches your actual schema exactly)
+    {
+      user_id,
+      lead_id,
+      step_no,
+      to_phone,
+      body,
+      scheduled_for,
+      status,
+      available_at,
+    },
+    // Variant B (with origin if provided)
+    {
+      user_id,
+      lead_id,
+      step_no,
+      to_phone,
+      body,
+      scheduled_for,
+      status,
+      available_at,
+      origin: null,
+    },
+    // Variant C (minimal - let defaults handle created_at, updated_at)
+    {
+      user_id,
+      lead_id,
+      step_no,
+      to_phone,
+      body,
+      scheduled_for,
+    },
+    // Variant D (no available_at)
+    {
+      user_id,
+      lead_id,
+      step_no,
+      to_phone,
+      body,
+      scheduled_for,
+      status,
+    },
+  ];
+}
+
+async function insertSmsQueueRows(supabaseAdmin, baseRows) {
+  // baseRows is an array of objects: { user_id, lead_id, step_no, to_phone, body, send_at_iso }
+  // We try one “shape” across all rows so it’s consistent.
+
+  if (!Array.isArray(baseRows) || !baseRows.length) {
+    return { ok: true, inserted: 0, ids: [] };
+  }
+
+  // Build variants for FIRST row, then apply same shape to all rows.
+  const first = baseRows[0];
+  const firstVariants = buildInsertVariants(first);
+
+  for (let i = 0; i < firstVariants.length; i++) {
+    const shape = firstVariants[i];
+    const keys = Object.keys(shape);
+
+    const shapedRows = baseRows.map((r) => {
+      const v = buildInsertVariants(r)[i] || {};
+      // ensure only the keys for this variant
+      const out = {};
+      for (const k of keys) out[k] = v[k];
+      return out;
+    });
+
+    const ins = await supabaseAdmin.from("sms_queue").insert(shapedRows).select("id");
+    if (!ins.error) {
+      return {
+        ok: true,
+        inserted: shapedRows.length,
+        ids: (ins.data || []).map((x) => x.id),
+        used_variant: i,
+        used_keys: keys,
+      };
+    }
+
+    // If it's a "column does not exist" type mismatch, try next variant.
+    const msg = s(ins.error.message);
+    const isColumnMismatch =
+      msg.includes("does not exist") ||
+      msg.includes("column") ||
+      msg.includes("schema cache") ||
+      msg.includes("Could not find") ||
+      msg.includes("unknown");
+
+    if (!isColumnMismatch) {
+      // real error like RLS, not-null, etc -> stop
+      return { ok: false, error: ins.error.message, detail: ins.error };
+    }
+  }
+
+  return { ok: false, error: "Could not match sms_queue columns (all insert variants failed)" };
 }
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
     res.setHeader("Allow", "POST");
     return json(res, 405, { ok: false, error: "Method not allowed" });
->>>>>>> 524cfe9 (WIP: autoresponder + automation + sms fixes)
   }
 
-  if (!SUPABASE_URL || !SERVICE_KEY) {
+  if (!SUPABASE_URL || !ANON_KEY || !SERVICE_KEY) {
     return json(res, 500, { ok: false, error: "Missing Supabase env" });
   }
 
-  const supabaseAnon = createClient(
-    SUPABASE_URL,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY || "",
-    { auth: { persistSession: false } }
-  );
+  const supabaseAnon = createClient(SUPABASE_URL, ANON_KEY, {
+    auth: { persistSession: false },
+  });
   const supabaseAdmin = createClient(SUPABASE_URL, SERVICE_KEY, {
     auth: { persistSession: false },
   });
@@ -343,80 +300,167 @@ export default async function handler(req, res) {
   const user = await getUserFromBearer(req, supabaseAnon);
   if (!user) return json(res, 401, { ok: false, error: "Unauthorized" });
 
-  // Safe body read
   let body = {};
   try {
-    body = typeof req.body === "string" ? JSON.parse(req.body) : (req.body || {});
+    body = typeof req.body === "string" ? JSON.parse(req.body) : req.body || {};
   } catch {
     body = req.body || {};
   }
 
-  // UI sends { audience:{type:'lead', lead_id}, steps:[...] }
   const audience = body.audience || {};
-  const stepsRaw = body.steps || [];
+  const audienceType = s(audience.type || body.audienceType || "lead").toLowerCase();
 
-  if (s(audience.type) !== "lead") {
-    return json(res, 400, { ok: false, error: "Only audience.type='lead' is supported here right now" });
+  const stepsRaw = Array.isArray(body.steps) ? body.steps : [];
+  if (!stepsRaw.length) return json(res, 400, { ok: false, error: "Missing steps" });
+
+  const steps = stepsRaw
+    .map((st) => ({
+      delay: Number(st.delay || 0),
+      unit: s(st.unit || "minutes"),
+      message: s(st.message || st.body || st.text),
+    }))
+    .filter((x) => x.message)
+    .slice(0, 3);
+
+  if (!steps.length) return json(res, 400, { ok: false, error: "No valid messages in steps" });
+
+  // Build recipients [{ lead_id?, to_phone }]
+  const recipients = [];
+
+  if (audienceType === "manual") {
+    const phone = normalizePhoneForSend(audience.phone || audience.to || body.phone || body.to);
+    if (!phone) return json(res, 400, { ok: false, error: "Missing manual phone" });
+    recipients.push({ lead_id: null, to_phone: phone });
+  } else if (audienceType === "lead") {
+    const lead_id = s(audience.lead_id || body.lead_id || body.leadId);
+    if (!lead_id) return json(res, 400, { ok: false, error: "Missing lead_id" });
+
+    const { data: lead, error: leadErr } = await supabaseAdmin
+      .from("leads")
+      .select("*")
+      .eq("id", lead_id)
+      .maybeSingle();
+
+    if (leadErr) {
+      return json(res, 500, { ok: false, error: "Lead lookup failed", detail: leadErr.message });
+    }
+    if (!lead) return json(res, 404, { ok: false, error: "Lead not found" });
+
+    if (!isOwnedByUser(lead, user.id)) {
+      return json(res, 403, { ok: false, error: "Not your lead" });
+    }
+
+    const phone = normalizePhoneForSend(pickLeadPhone(lead));
+    if (!phone) return json(res, 400, { ok: false, error: "Lead has no phone number" });
+
+    recipients.push({ lead_id, to_phone: phone });
+  } else if (audienceType === "list") {
+    const list_id = s(audience.list_id || body.list_id || body.listId);
+    if (!list_id) return json(res, 400, { ok: false, error: "Missing list_id" });
+
+    const leadIds = await getLeadIdsForList(supabaseAdmin, list_id);
+    if (!leadIds.length) {
+      return json(res, 400, { ok: false, error: "No leads found in this list (membership table mismatch?)" });
+    }
+
+    // Load leads in chunks
+    const chunkSize = 500;
+    for (let i = 0; i < leadIds.length; i += chunkSize) {
+      const chunk = leadIds.slice(i, i + chunkSize);
+      const { data: leadRows, error } = await supabaseAdmin
+        .from("leads")
+        .select("*")
+        .in("id", chunk);
+
+      if (error) {
+        return json(res, 500, { ok: false, error: "Lead batch lookup failed", detail: error.message });
+      }
+
+      for (const lead of leadRows || []) {
+        if (!isOwnedByUser(lead, user.id)) continue;
+        const phone = normalizePhoneForSend(pickLeadPhone(lead));
+        if (!phone) continue;
+        recipients.push({ lead_id: s(lead.id), to_phone: phone });
+      }
+    }
+
+    if (!recipients.length) {
+      return json(res, 400, { ok: false, error: "No sendable leads in list (no phones or not owned by user)" });
+    }
+  } else {
+    return json(res, 400, { ok: false, error: "Invalid audience.type" });
   }
 
-  const lead_id = s(audience.lead_id || body.lead_id || body.leadId);
-  if (!lead_id) return json(res, 400, { ok: false, error: "Missing lead_id" });
+  // Build sms_queue rows with cumulative delays
+  const now = Date.now();
+  let cumulativeMinutes = 0;
 
-  const steps = Array.isArray(stepsRaw) ? stepsRaw : [];
-  if (!steps.length) return json(res, 400, { ok: false, error: "Missing steps" });
+  const baseRows = [];
+  const available_at = new Date(now).toISOString();
+  for (let stepIndex = 0; stepIndex < steps.length; stepIndex++) {
+    const st = steps[stepIndex];
+    const addMinutes = Math.max(0, Number(st.delay || 0)) * unitToMinutes(st.unit);
+    cumulativeMinutes += addMinutes;
 
-  // ✅ CRITICAL FIX: do NOT select non-existent columns → select("*")
-  const { data: lead, error: leadErr } = await supabaseAdmin
-    .from("leads")
-    .select("*")
-    .eq("id", lead_id)
-    .eq("user_id", user.id)
-    .maybeSingle();
+    const sendAtMs = now + cumulativeMinutes * 60 * 1000;
+    const send_at_iso = new Date(sendAtMs).toISOString();
 
-  if (leadErr) {
-    return json(res, 500, { ok: false, error: "Lead lookup failed", detail: leadErr.message });
-  }
-  if (!lead) {
-    return json(res, 404, { ok: false, error: "Lead not found (or not your lead)" });
-  }
-
-  const toPhone = pickLeadPhone(lead);
-  if (!toPhone) {
-    return json(res, 400, { ok: false, error: "Lead has no phone number field filled in" });
-  }
-
-  // Build sms_queue rows using YOUR schema
-  const rows = [];
-  for (let i = 0; i < Math.min(steps.length, 3); i++) {
-    const st = steps[i] || {};
-    const msg = s(st.message || st.body || st.text);
-    if (!msg) continue;
-
-    rows.push({
-      user_id: user.id,
-      lead_id: lead_id,
-      step_no: i + 1,
-      to_phone: toPhone,
-      body: msg,
-    });
+    for (const r of recipients) {
+      baseRows.push({
+        user_id: user.id,
+        lead_id: r.lead_id,
+        step_no: stepIndex + 1,
+        to_phone: r.to_phone,
+        body: st.message,
+        send_at_iso,
+        scheduled_for: send_at_iso,
+        available_at,
+        status: "queued",
+      });
+    }
   }
 
-  if (!rows.length) {
-    return json(res, 400, { ok: false, error: "No valid messages in steps" });
-  }
-
-  const ins = await supabaseAdmin.from("sms_queue").insert(rows).select("id");
-  if (ins.error) {
+  const ins = await insertSmsQueueRows(supabaseAdmin, baseRows);
+  if (!ins.ok) {
     return json(res, 500, {
       ok: false,
       error: "Failed to enqueue sms_queue rows",
-      detail: ins.error.message,
+      detail: ins.error || ins,
+      message: typeof ins?.error === "string" ? ins.error : ins?.error?.message,
     });
+  }
+
+  // Auto-flush queued SMS after queueing (like automation does for emails)
+  let flushResult = null;
+  try {
+    const siteUrl = process.env.NEXT_PUBLIC_SITE_URL || 'http://localhost:3000';
+    const cronKey = process.env.CRON_SECRET || process.env.AUTOMATION_CRON_KEY || '';
+    
+    // Always try to flush - endpoint handles auth (dev mode allows no key)
+    const flushUrl = cronKey 
+      ? `${siteUrl}/api/smsglobal/flush-queue?key=${encodeURIComponent(cronKey)}&limit=50`
+      : `${siteUrl}/api/smsglobal/flush-queue?limit=50`;
+    
+    const flushResponse = await fetch(flushUrl, {
+      method: 'GET',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+    });
+    flushResult = await flushResponse.json();
+  } catch (flushErr) {
+    // Flush error doesn't fail the response, just log it
+    console.error('Auto-flush SMS failed:', flushErr?.message || flushErr);
   }
 
   return json(res, 200, {
     ok: true,
-    queued: rows.length,
-    inserted_ids: (ins.data || []).map((r) => r.id),
+    recipients: recipients.length,
+    steps: steps.length,
+    queued: baseRows.length,
+    inserted_ids: ins.ids || [],
+    used_variant: ins.used_variant,
+    used_keys: ins.used_keys,
+    auto_flush: flushResult?.ok ? { sent: flushResult?.debug?.sent || 0 } : { error: 'no flush' },
   });
 }

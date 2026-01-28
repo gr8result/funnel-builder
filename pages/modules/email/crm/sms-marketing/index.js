@@ -1,13 +1,16 @@
-// /pages/modules/email/crm/sms-marketing/index.js
-// FULL REPLACEMENT — Campaign + Single both support Lead dropdown again (no reinventing)
+// FULL REPLACEMENT — FIXES BROKEN ENDPOINT WIRING + REMOVES UNSUPPORTED "LIST/MANUAL CAMPAIGN" PATHS
+//
 // ✅ Keeps your existing structure + banner
-// ✅ Campaign queues into sms_queue (via /api/smsglobal/launch-sequence)
-// ✅ Single sends via /api/smsglobal/SMSGlobalSMSSend using lead_id OR manual to
-// ✅ Emoji picker kept — NOW 2x size + stays open until you close it
-<<<<<<< HEAD
-// ✅ Emojis themselves are now BIG (about double): ~36px, bigger buttons
-=======
->>>>>>> 524cfe9 (WIP: autoresponder + automation + sms fixes)
+// ✅ Campaign queues into sms_queue via POST /api/smsglobal/launch-sequence (LEAD ONLY — matches your API)
+// ✅ Single sends via POST /api/smsglobal/SMSSend (lead_id OR manual to)
+// ✅ Emoji picker kept — BIG + stays open until you close it
+// ✅ Pulls lead_id from URL (?lead_id=...) and preselects Campaign + Single
+// ✅ IMPORTANT: Never sends empty Authorization header (cached tokenRef)
+//
+// NOTE (the actual fix):
+// Your /api/smsglobal/launch-sequence endpoint you pasted ONLY supports audience.type === "lead".
+// So this UI now ONLY allows Campaign = Lead.
+// (We removed Campaign List/Manual and Single List so it stops throwing errors.)
 
 import Head from "next/head";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -33,46 +36,11 @@ function formatPhonePretty(raw) {
   return raw;
 }
 
-async function getAccessToken() {
-  const { data } = await supabase.auth.getSession();
-  return data?.session?.access_token || "";
-}
-
-async function apiGet(path) {
-  const token = await getAccessToken();
-  const r = await fetch(path, {
-    method: "GET",
-    headers: { Authorization: token ? `Bearer ${token}` : "" },
-  });
-  const j = await r.json().catch(() => ({}));
-  if (!r.ok || j?.ok === false) {
-    const err = new Error(j?.error || "Request failed");
-    err.detail = j?.detail || null;
-    err.status = r.status;
-    throw err;
-  }
-  return j;
-}
-
-async function apiPost(path, body) {
-  const token = await getAccessToken();
-  const r = await fetch(path, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: token ? `Bearer ${token}` : "",
-    },
-    body: JSON.stringify(body || {}),
-  });
-  const j = await r.json().catch(() => ({}));
-  if (!r.ok || j?.ok === false) {
-    const msg = j?.error || "Request failed";
-    const err = new Error(msg);
-    err.detail = j?.detail || j || null;
-    err.status = r.status;
-    throw err;
-  }
-  return j;
+function normalizePhoneForSend(raw) {
+  const t = s(raw);
+  if (!t) return "";
+  if (t.startsWith("+")) return `+${digitsOnly(t)}`;
+  return digitsOnly(t);
 }
 
 const DEFAULT_TEMPLATES = [
@@ -114,107 +82,112 @@ function BannerIcon({ size = 48 }) {
       }}
       aria-hidden="true"
     >
-      <svg width={Math.round(size * 0.62)} height={Math.round(size * 0.62)} viewBox="0 0 24 24" fill="none">
+      <svg
+        width={Math.round(size * 0.62)}
+        height={Math.round(size * 0.62)}
+        viewBox="0 0 24 24"
+        fill="none"
+      >
         <path
           d="M7.5 18.2 4 20V6.8C4 5.8 4.8 5 5.8 5H18.2C19.2 5 20 5.8 20 6.8V14.2C20 15.2 19.2 16 18.2 16H9.6L7.5 18.2Z"
           stroke="white"
           strokeWidth="1.8"
           strokeLinejoin="round"
         />
-        <path d="M7.2 9.2H16.8M7.2 12H14.8" stroke="white" strokeWidth="1.8" strokeLinecap="round" />
+        <path
+          d="M7.2 9.2H16.8M7.2 12H14.8"
+          stroke="white"
+          strokeWidth="1.8"
+          strokeLinecap="round"
+        />
       </svg>
     </div>
   );
 }
 
-<<<<<<< HEAD
-// ✅ BIGGER + DOES NOT AUTO CLOSE + BIGGER EMOJI GLYPHS
-=======
-// ✅ BIGGER + DOES NOT AUTO CLOSE
->>>>>>> 524cfe9 (WIP: autoresponder + automation + sms fixes)
+// ✅ BIGGER GLYPHS (but not bigger tiles) + DOES NOT AUTO CLOSE UNLESS ESC / OUTSIDE CLICK / Close BUTTON
 function EmojiPicker({ open, onPick, onClose }) {
-  const pickerRef = useRef(null);
+  const containerRef = useRef(null);
 
-  // Close only on ESC (NOT on outside click)
   useEffect(() => {
     if (!open) return;
 
     function onKey(e) {
       if (e.key === "Escape") onClose?.();
     }
+    function onDown(e) {
+      // if click/tap is outside the picker container, close it
+      if (!containerRef.current) return;
+      const el = containerRef.current;
+      if (!el.contains(e.target)) onClose?.();
+    }
 
     window.addEventListener("keydown", onKey, true);
-    return () => window.removeEventListener("keydown", onKey, true);
+    // use capture so clicks are detected even if other handlers stop propagation
+    document.addEventListener("mousedown", onDown, true);
+    document.addEventListener("touchstart", onDown, true);
+
+    return () => {
+      window.removeEventListener("keydown", onKey, true);
+      document.removeEventListener("mousedown", onDown, true);
+      document.removeEventListener("touchstart", onDown, true);
+    };
   }, [open, onClose]);
 
   if (!open) return null;
 
   return (
     <div
-      ref={pickerRef}
+      ref={containerRef}
       style={{
         position: "absolute",
         right: 0,
         top: "calc(100% + 10px)",
         zIndex: 50,
-
-<<<<<<< HEAD
-        // 2x size panel
-        width: 720,
-=======
-        // 2x size
-        width: 640,
->>>>>>> 524cfe9 (WIP: autoresponder + automation + sms fixes)
+        width: 720, // keep panel width as original
         borderRadius: 16,
-        border: "1px solid rgba(255,255,255,0.14)",
+        border: "1px solid rgba(255, 255, 255, 0.14)",
         background: "rgba(5,10,20,0.98)",
         boxShadow: "0 18px 60px rgba(0,0,0,0.65)",
         padding: 14,
       }}
     >
-<<<<<<< HEAD
-      <div style={{ color: "rgba(255,255,255,0.88)", fontSize: 18, marginBottom: 10, fontWeight: 700 }}>
+      <div
+        style={{
+          color: "rgba(255,255,255,0.88)",
+          fontSize: 18,
+          marginBottom: 10,
+          fontWeight: 700,
+        }}
+      >
         Pick emojis (stays open — press Close when done)
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(10, 1fr)", gap: 10 }}>
-=======
-      <div style={{ color: "rgba(255,255,255,0.85)", fontSize: 18, marginBottom: 10, fontWeight: 600 }}>
-        Pick emojis (stays open — press Close when done)
-      </div>
-
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(10, 1fr)", gap: 8 }}>
->>>>>>> 524cfe9 (WIP: autoresponder + automation + sms fixes)
+      {/* keep original grid (many columns) but scale the emoji glyph only */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(10, 1fr)", gap: 12 }}>
         {EMOJIS.map((e) => (
           <button
             key={e}
             type="button"
-            onClick={() => onPick?.(e)} // ✅ does NOT close
+            onClick={() => onPick?.(e)}
             style={{
-<<<<<<< HEAD
-              height: 64,
+              height: 64, // original tile height
               borderRadius: 16,
               border: "1px solid rgba(255,255,255,0.12)",
               background: "rgba(255,255,255,0.07)",
               cursor: "pointer",
-
-              // ✅ BIG EMOJI GLYPH (double-ish)
-              fontSize: 36,
-              lineHeight: "64px",
-=======
-              height: 54,
-              borderRadius: 14,
-              border: "1px solid rgba(255,255,255,0.10)",
-              background: "rgba(255,255,255,0.06)",
-              cursor: "pointer",
-              fontSize: 26,
-              lineHeight: "54px",
->>>>>>> 524cfe9 (WIP: autoresponder + automation + sms fixes)
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              padding: 0,
             }}
             aria-label={`emoji ${e}`}
             title={e}
           >
-            {e}
+            {/* scale only the emoji glyph so the tile stays the same size; slightly reduced from previous */}
+            <span style={{ display: "inline-block", fontSize: 36, transform: "scale(1.5)", lineHeight: 1, transformOrigin: "center" }}>
+              {e}
+            </span>
           </button>
         ))}
       </div>
@@ -247,14 +220,13 @@ export default function SmsMarketingPage() {
   const [bannerError, setBannerError] = useState("");
   const [loading, setLoading] = useState(true);
 
-  const [leads, setLeads] = useState([]);
-  const [leadLists, setLeadLists] = useState([]);
+  const [accessToken, setAccessToken] = useState("");
+  const tokenRef = useRef("");
 
-  // Campaign audience
-  const [audienceType, setAudienceType] = useState("lead"); // manual | lead | list
+  const [leads, setLeads] = useState([]);
+
+  // Campaign audience (LEAD ONLY to match /api/smsglobal/launch-sequence)
   const [selectedLeadId, setSelectedLeadId] = useState("");
-  const [selectedListId, setSelectedListId] = useState("");
-  const [manualPhone, setManualPhone] = useState("");
 
   const [templates] = useState(DEFAULT_TEMPLATES);
 
@@ -266,12 +238,10 @@ export default function SmsMarketingPage() {
 
   const [sendingCampaign, setSendingCampaign] = useState(false);
 
-  // Single audience
-  const [singleAudienceType, setSingleAudienceType] = useState("lead"); // manual | lead | list
+  // Single audience (lead/manual only)
+  const [singleAudienceType, setSingleAudienceType] = useState("lead"); // manual | lead
   const [singleLeadId, setSingleLeadId] = useState("");
-  const [singleListId, setSingleListId] = useState("");
   const [singleManualPhone, setSingleManualPhone] = useState("");
-
   const [singleMessage, setSingleMessage] = useState("");
   const [sendingSingle, setSendingSingle] = useState(false);
 
@@ -279,13 +249,60 @@ export default function SmsMarketingPage() {
   const [emojiOpen, setEmojiOpen] = useState(false);
   const [emojiTarget, setEmojiTarget] = useState({ kind: null, index: null }); // {kind:'step'|'single', index:number|null}
 
+  // --- AUTH HELPERS (NO EMPTY AUTH HEADER EVER) ---
+  function requireToken() {
+    const t = tokenRef.current || "";
+    if (!t) {
+      const err = new Error("Not logged in (missing session token). Please refresh and log in again.");
+      err.status = 401;
+      throw err;
+    }
+    return t;
+  }
+
+  async function apiGet(path) {
+    const token = requireToken();
+    const r = await fetch(path, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || j?.ok === false) {
+      const err = new Error(j?.error || "Request failed");
+      err.detail = j?.detail || null;
+      err.status = r.status;
+      throw err;
+    }
+    return j;
+  }
+
+  async function apiPost(path, body) {
+    const token = requireToken();
+    const r = await fetch(path, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(body || {}),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || j?.ok === false) {
+      const msg = j?.error || "Request failed";
+      const err = new Error(msg);
+      err.detail = j?.detail || j || null;
+      err.status = r.status;
+      throw err;
+    }
+    return j;
+  }
+
   const leadOptions = useMemo(() => {
     const arr = Array.isArray(leads) ? leads : [];
     return arr.map((l) => {
       const labelParts = [];
       if (s(l?.name)) labelParts.push(s(l.name));
       if (s(l?.email)) labelParts.push(s(l.email));
-      // UI-only: try common phone fields; safe even if column doesn't exist
       const ph = s(l?.phone_number || l?.mobile_phone || l?.phone || l?.mobile);
       if (ph) labelParts.push(ph);
       const label = labelParts.length ? labelParts.join(" — ") : l?.id;
@@ -293,10 +310,48 @@ export default function SmsMarketingPage() {
     });
   }, [leads]);
 
-  const listOptions = useMemo(() => {
-    const arr = Array.isArray(leadLists) ? leadLists : [];
-    return arr.map((x) => ({ id: x?.id, name: x?.name || x?.id }));
-  }, [leadLists]);
+  // ✅ keep token in sync even if session refreshes
+  useEffect(() => {
+    let alive = true;
+
+    async function initToken() {
+      try {
+        const { data } = await supabase.auth.getSession();
+        const t = data?.session?.access_token || "";
+        if (!alive) return;
+        setAccessToken(t);
+        tokenRef.current = t;
+      } catch {
+        if (!alive) return;
+        setAccessToken("");
+        tokenRef.current = "";
+      }
+    }
+
+    initToken();
+
+    const { data: sub } = supabase.auth.onAuthStateChange((_event, session) => {
+      const t = session?.access_token || "";
+      setAccessToken(t);
+      tokenRef.current = t;
+    });
+
+    return () => {
+      alive = false;
+      sub?.subscription?.unsubscribe?.();
+    };
+  }, []);
+
+  // ✅ preload lead_id from URL (both campaign + single)
+  useEffect(() => {
+    const qLead = s(router?.query?.lead_id);
+    if (qLead) {
+      setSelectedLeadId(qLead);
+      setSingleAudienceType("lead");
+      setSingleLeadId(qLead);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [router?.query?.lead_id]);
 
   useEffect(() => {
     let alive = true;
@@ -306,31 +361,26 @@ export default function SmsMarketingPage() {
       setBannerError("");
 
       try {
-        const token = await getAccessToken();
-        if (!token) {
-          if (!alive) return;
-          setBannerError("Not logged in (missing session).");
-          setLoading(false);
-          return;
+        if (!tokenRef.current) {
+          throw new Error("Not logged in (missing session). Please refresh and log in again.");
         }
 
         const leadRes = await apiGet("/api/crm/leads?limit=50000");
         const leadArr = Array.isArray(leadRes?.leads) ? leadRes.leads : [];
 
-        const listRes = await apiGet("/api/crm/lead-lists");
-        const listArr = Array.isArray(listRes?.lists) ? listRes.lists : [];
-
         if (!alive) return;
 
         setLeads(leadArr);
-        setLeadLists(listArr);
 
-        // Defaults
-        if (!selectedLeadId && leadArr.length) setSelectedLeadId(leadArr[0].id);
-        if (!selectedListId && listArr.length) setSelectedListId(listArr[0].id);
+        const qLead = s(router?.query?.lead_id);
 
-        if (!singleLeadId && leadArr.length) setSingleLeadId(leadArr[0].id);
-        if (!singleListId && listArr.length) setSingleListId(listArr[0].id);
+        if (qLead) {
+          setSelectedLeadId(qLead);
+          setSingleLeadId(qLead);
+        } else {
+          if (!selectedLeadId && leadArr.length) setSelectedLeadId(leadArr[0].id);
+          if (!singleLeadId && leadArr.length) setSingleLeadId(leadArr[0].id);
+        }
 
         setLoading(false);
       } catch (e) {
@@ -340,12 +390,17 @@ export default function SmsMarketingPage() {
       }
     }
 
-    load();
+    if (tokenRef.current) load();
+    else {
+      setLoading(false);
+      setBannerError("Not logged in (missing session). Please refresh and log in again.");
+    }
+
     return () => {
       alive = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [accessToken]);
 
   function setStep(i, patch) {
     setSteps((prev) => {
@@ -381,7 +436,7 @@ export default function SmsMarketingPage() {
     } else if (emojiTarget.kind === "single") {
       setSingleMessage((m) => (m || "") + e);
     }
-    // ✅ DO NOT CLOSE HERE
+    // DO NOT CLOSE
   }
 
   async function startCampaign() {
@@ -389,26 +444,13 @@ export default function SmsMarketingPage() {
     setSendingCampaign(true);
 
     try {
-      let audience = { type: audienceType };
+      requireToken();
 
-      if (audienceType === "manual") {
-        const phone = s(manualPhone);
-        if (!phone) throw new Error("Enter a phone number for manual send.");
-        audience.phone = phone;
-      } else if (audienceType === "lead") {
-        const lead_id = s(selectedLeadId);
-        if (!lead_id) throw new Error("Pick a lead.");
-        audience.lead_id = lead_id;
-      } else if (audienceType === "list") {
-        const list_id = s(selectedListId);
-        if (!list_id) throw new Error("Pick a list.");
-        audience.list_id = list_id;
-      } else {
-        throw new Error("Invalid audience type.");
-      }
+      const lead_id = s(selectedLeadId);
+      if (!lead_id) throw new Error("Pick a lead.");
 
       const payload = {
-        audience,
+        audience: { type: "lead", lead_id },
         steps: steps
           .map((st) => ({
             delay: Number(st.delay || 0),
@@ -421,13 +463,13 @@ export default function SmsMarketingPage() {
 
       const r = await apiPost("/api/smsglobal/launch-sequence", payload);
 
-      setBannerError(
-        `Queued: ${r?.queued ?? 0} (recipients: ${r?.recipients ?? 0}, steps: ${r?.steps ?? 0})`
-      );
+      setBannerError(`Queued: ${r?.queued ?? 0}`);
     } catch (e) {
       const detail = e?.detail?.detail || e?.detail?.message || "";
       setBannerError(
-        e?.message ? `Server error: ${e.message}${detail ? ` — ${detail}` : ""}` : "Server error"
+        e?.message
+          ? `Server error: ${e.message}${detail ? ` — ${detail}` : ""}`
+          : "Server error"
       );
     } finally {
       setSendingCampaign(false);
@@ -439,49 +481,38 @@ export default function SmsMarketingPage() {
     setSendingSingle(true);
 
     try {
+      requireToken();
+
       const msg = s(singleMessage);
       if (!msg) throw new Error("Enter a message.");
 
+      // ✅ correct route is /api/smsglobal/SMSSend
       if (singleAudienceType === "lead") {
         const lead_id = s(singleLeadId);
         if (!lead_id) throw new Error("Pick a lead.");
-        const r = await apiPost("/api/smsglobal/SMSGlobalSMSSend", { lead_id, message: msg });
+        const r = await apiPost("/api/smsglobal/SMSSend", { lead_id, message: msg });
         setBannerError(`Sent OK (provider_id: ${r?.provider_id || "-"})`);
         setSingleMessage("");
         return;
       }
 
       if (singleAudienceType === "manual") {
-        const to = s(singleManualPhone);
+        const to = normalizePhoneForSend(singleManualPhone);
         if (!to) throw new Error("Enter a phone number.");
-        const r = await apiPost("/api/smsglobal/SMSGlobalSMSSend", { to, message: msg });
+        const r = await apiPost("/api/smsglobal/SMSSend", { to, message: msg });
         setBannerError(`Sent OK (provider_id: ${r?.provider_id || "-"})`);
-        setSingleMessage("");
-        return;
-      }
-
-      if (singleAudienceType === "list") {
-        const list_id = s(singleListId);
-        if (!list_id) throw new Error("Pick a list.");
-        const r = await apiPost("/api/smsglobal/launch-sequence", {
-          audience: { type: "list", list_id },
-          steps: [{ delay: 0, unit: "minutes", message: msg }],
-        });
-        setBannerError(`Queued single-to-list: ${r?.queued ?? 0}`);
         setSingleMessage("");
         return;
       }
 
       throw new Error("Invalid single audience type.");
     } catch (e) {
-      const detail = e?.detail?.detail || e?.detail?.smsglobal_http || e?.detail?.message || "";
-<<<<<<< HEAD
+      const detail = e?.detail?.detail || e?.detail?.raw || e?.detail?.message || "";
       setBannerError(
-        e?.message ? `Server error: ${e.message}${detail ? ` — ${detail}` : ""}` : "Server error"
+        e?.message
+          ? `Server error: ${e.message}${detail ? ` — ${detail}` : ""}`
+          : "Server error"
       );
-=======
-      setBannerError(e?.message ? `Server error: ${e.message}${detail ? ` — ${detail}` : ""}` : "Server error");
->>>>>>> 524cfe9 (WIP: autoresponder + automation + sms fixes)
     } finally {
       setSendingSingle(false);
     }
@@ -571,16 +602,16 @@ export default function SmsMarketingPage() {
               Queue up to 3 SMS messages. Delays are “since previous step”.
             </div>
 
-            {/* Audience row */}
-            <div style={{ display: "grid", gridTemplateColumns: "220px 1fr", gap: 12, marginBottom: 12 }}>
+            {/* Audience row (LEAD ONLY) */}
+            <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 12, marginBottom: 12 }}>
               <div>
                 <div style={{ color: "rgba(255,255,255,0.75)", fontSize: 16, marginBottom: 6 }}>
-                  Audience
+                  Select lead
                 </div>
                 <select
                   className="gr8Select"
-                  value={audienceType}
-                  onChange={(e) => setAudienceType(e.target.value)}
+                  value={selectedLeadId}
+                  onChange={(e) => setSelectedLeadId(e.target.value)}
                   style={{
                     width: "100%",
                     padding: "9px 10px",
@@ -591,87 +622,16 @@ export default function SmsMarketingPage() {
                     fontWeight: 500,
                   }}
                 >
-                  <option value="manual">Send to one number (manual)</option>
-                  <option value="lead">Send to one lead (pick)</option>
-                  <option value="list">Send to a list</option>
+                  {leadOptions.length ? (
+                    leadOptions.map((x) => (
+                      <option key={x.id} value={x.id}>
+                        {x.label}
+                      </option>
+                    ))
+                  ) : (
+                    <option value="">(No leads loaded for this user)</option>
+                  )}
                 </select>
-              </div>
-
-              <div>
-                <div style={{ color: "rgba(255,255,255,0.75)", fontSize: 16, marginBottom: 6 }}>
-                  {audienceType === "manual"
-                    ? "Phone number"
-                    : audienceType === "list"
-                    ? "Lead list"
-                    : "Select lead"}
-                </div>
-
-                {audienceType === "manual" ? (
-                  <input
-                    value={manualPhone}
-                    onChange={(e) => setManualPhone(e.target.value)}
-                    placeholder="0417… or +61417…"
-                    style={{
-                      width: "100%",
-                      padding: "9px 10px",
-                      borderRadius: 10,
-                      background: "rgba(0,0,0,0.55)",
-                      color: "#fff",
-                      border: "1px solid rgba(255,255,255,0.12)",
-                      fontWeight: 500,
-                    }}
-                  />
-                ) : audienceType === "list" ? (
-                  <select
-                    className="gr8Select"
-                    value={selectedListId}
-                    onChange={(e) => setSelectedListId(e.target.value)}
-                    style={{
-                      width: "100%",
-                      padding: "9px 10px",
-                      borderRadius: 10,
-                      background: "rgba(0,0,0,0.55)",
-                      color: "#fff",
-                      border: "1px solid rgba(255,255,255,0.12)",
-                      fontWeight: 500,
-                    }}
-                  >
-                    {listOptions.length ? (
-                      listOptions.map((x) => (
-                        <option key={x.id} value={x.id}>
-                          {x.name}
-                        </option>
-                      ))
-                    ) : (
-                      <option value="">(No lists loaded for this user)</option>
-                    )}
-                  </select>
-                ) : (
-                  <select
-                    className="gr8Select"
-                    value={selectedLeadId}
-                    onChange={(e) => setSelectedLeadId(e.target.value)}
-                    style={{
-                      width: "100%",
-                      padding: "9px 10px",
-                      borderRadius: 10,
-                      background: "rgba(0,0,0,0.55)",
-                      color: "#fff",
-                      border: "1px solid rgba(255,255,255,0.12)",
-                      fontWeight: 500,
-                    }}
-                  >
-                    {leadOptions.length ? (
-                      leadOptions.map((x) => (
-                        <option key={x.id} value={x.id}>
-                          {x.label}
-                        </option>
-                      ))
-                    ) : (
-                      <option value="">(No leads loaded for this user)</option>
-                    )}
-                  </select>
-                )}
               </div>
             </div>
 
@@ -687,18 +647,14 @@ export default function SmsMarketingPage() {
                     padding: 12,
                   }}
                 >
-                  <div style={{ color: "#facc15", fontWeight: 600, marginBottom: 2 }}>
-                    Step {i + 1}
-                  </div>
+                  <div style={{ color: "#facc15", fontWeight: 600, marginBottom: 2 }}>Step {i + 1}</div>
                   <div style={{ color: "rgba(255,255,255,0.65)", fontSize: 16, marginBottom: 10 }}>
                     {i === 0 ? "Delay before step 1. Set 0 to send immediately." : `Delay after step ${i}.`}
                   </div>
 
                   <div style={{ display: "grid", gridTemplateColumns: "1fr 92px 130px", gap: 8 }}>
                     <div>
-                      <div style={{ color: "rgba(255,255,255,0.70)", fontSize: 16, marginBottom: 6 }}>
-                        Template
-                      </div>
+                      <div style={{ color: "rgba(255,255,255,0.70)", fontSize: 16, marginBottom: 6 }}>Template</div>
                       <select
                         className="gr8Select"
                         value={steps[i]?.templateId || ""}
@@ -722,9 +678,7 @@ export default function SmsMarketingPage() {
                     </div>
 
                     <div>
-                      <div style={{ color: "rgba(255,255,255,0.70)", fontSize: 16, marginBottom: 6 }}>
-                        Delay
-                      </div>
+                      <div style={{ color: "rgba(255,255,255,0.70)", fontSize: 16, marginBottom: 6 }}>Delay</div>
                       <input
                         value={String(steps[i]?.delay ?? 0)}
                         onChange={(e) => setStep(i, { delay: Number(e.target.value || 0) })}
@@ -743,9 +697,7 @@ export default function SmsMarketingPage() {
                     </div>
 
                     <div>
-                      <div style={{ color: "rgba(255,255,255,0.70)", fontSize: 16, marginBottom: 6 }}>
-                        Unit
-                      </div>
+                      <div style={{ color: "rgba(255,255,255,0.70)", fontSize: 16, marginBottom: 6 }}>Unit</div>
                       <select
                         className="gr8Select"
                         value={steps[i]?.unit || "minutes"}
@@ -836,8 +788,7 @@ export default function SmsMarketingPage() {
               </button>
 
               <div style={{ color: "rgba(255,255,255,0.55)", fontSize: 16 }}>
-                Leads loaded: <b>{Array.isArray(leads) ? leads.length : 0}</b> • Lists loaded:{" "}
-                <b>{Array.isArray(leadLists) ? leadLists.length : 0}</b>
+                Leads loaded: <b>{Array.isArray(leads) ? leads.length : 0}</b>
               </div>
             </div>
           </div>
@@ -853,17 +804,15 @@ export default function SmsMarketingPage() {
               boxShadow: "0 12px 34px rgba(0,0,0,0.25)",
             }}
           >
-            <div style={{ color: "#facc15", fontWeight: 600, fontSize: 18, marginBottom: 4 }}>
-              Single SMS
-            </div>
-            <div style={{ color: "rgba(255,255,255,0.70)", fontSize: 16, marginBottom: 12 }}>
+            <div style={{ color: "#facc15", fontWeight: 600, fontSize: 18, marginBottom: 4 }}>Single SMS</div>
+            <div style={{ color: "rgb(123, 214, 48)", fontSize: 24, marginBottom: 12 }}>
               Use keypad + templates for quick one-off messages.
             </div>
 
             {/* Single audience row */}
-            <div style={{ display: "grid", gridTemplateColumns: "160px 1fr", gap: 12, marginBottom: 12 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "260px 1fr", gap: 12, marginBottom: 12 }}>
               <div>
-                <div style={{ color: "rgba(255,255,255,0.75)", fontSize: 16, marginBottom: 6 }}>Send to</div>
+                <div style={{ color: "rgb(123, 214, 48)", fontSize: 16, marginBottom: 6 }}>Send to</div>
                 <select
                   className="gr8Select"
                   value={singleAudienceType}
@@ -880,17 +829,12 @@ export default function SmsMarketingPage() {
                 >
                   <option value="lead">A lead (pick)</option>
                   <option value="manual">One number (manual)</option>
-                  <option value="list">A list (queues 1 step)</option>
                 </select>
               </div>
 
               <div>
                 <div style={{ color: "rgba(255,255,255,0.75)", fontSize: 16, marginBottom: 6 }}>
-                  {singleAudienceType === "manual"
-                    ? "Phone number"
-                    : singleAudienceType === "list"
-                    ? "Lead list"
-                    : "Select lead"}
+                  {singleAudienceType === "manual" ? "Phone number" : "Select lead"}
                 </div>
 
                 {singleAudienceType === "manual" ? (
@@ -908,31 +852,6 @@ export default function SmsMarketingPage() {
                       fontWeight: 600,
                     }}
                   />
-                ) : singleAudienceType === "list" ? (
-                  <select
-                    className="gr8Select"
-                    value={singleListId}
-                    onChange={(e) => setSingleListId(e.target.value)}
-                    style={{
-                      width: "100%",
-                      padding: "9px 10px",
-                      borderRadius: 10,
-                      background: "rgba(0,0,0,0.55)",
-                      color: "#fff",
-                      border: "1px solid rgba(255,255,255,0.12)",
-                      fontWeight: 500,
-                    }}
-                  >
-                    {listOptions.length ? (
-                      listOptions.map((x) => (
-                        <option key={x.id} value={x.id}>
-                          {x.name}
-                        </option>
-                      ))
-                    ) : (
-                      <option value="">(No lists loaded for this user)</option>
-                    )}
-                  </select>
                 ) : (
                   <select
                     className="gr8Select"
@@ -967,13 +886,13 @@ export default function SmsMarketingPage() {
               <div
                 style={{
                   border: "1px solid rgba(255,255,255,0.10)",
-                  borderRadius: 14,
+                  borderRadius: 12,
                   padding: 12,
                   background: "rgba(0,0,0,0.20)",
                 }}
               >
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10 }}>
-                  {["1", "2", "3", "4", "5", "6", "7", "8", "9", "+", "0", "⌫"].map((k) => (
+                  {["1","2","3","4","5","6","7","8","9","+","0","⌫"].map((k) => (
                     <button
                       key={k}
                       type="button"
@@ -983,18 +902,26 @@ export default function SmsMarketingPage() {
                         setSingleManualPhone((p) => (p || "") + k);
                       }}
                       style={{
-                        padding: "16px 0",
+                        padding: "16px 0", // keep original tile padding/height
                         borderRadius: 12,
                         background: "rgba(99,102,241,0.18)",
                         border: "1px solid rgba(99,102,241,0.35)",
-                        color: "#fff",
-                        fontWeight: 800,
-                        fontSize: 26,
+                        color: "rgb(123, 214, 48)",
+                        fontWeight: 500,
                         cursor: singleAudienceType === "manual" ? "pointer" : "not-allowed",
-                        opacity: singleAudienceType === "manual" ? 1 : 0.35,
+                        opacity: singleAudienceType === "manual" ? 1 : 0.85,
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        // base fontSize reduced so scaled glyph fits cleanly
+                        fontSize: 28,
+                        lineHeight: "1",
                       }}
                     >
-                      {k}
+                      {/* scale only the digit glyph; keeps tile size unchanged */}
+                      <span style={{ display: "inline-block", transform: "scale(1.9)", transformOrigin: "center", lineHeight: 1 }}>
+                        {k}
+                      </span>
                     </button>
                   ))}
                 </div>
@@ -1064,7 +991,7 @@ export default function SmsMarketingPage() {
                   </div>
                 </div>
 
-                <div style={{ marginTop: 6, color: "rgba(255,255,255,0.70)", fontSize: 16 }}>SMS message</div>
+                <div style={{ marginTop: 6, color: "rgb(255, 253, 253)", fontSize: 24 }}>SMS message</div>
                 <textarea
                   value={singleMessage}
                   onChange={(e) => setSingleMessage(e.target.value)}

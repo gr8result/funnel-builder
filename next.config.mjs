@@ -2,6 +2,9 @@
 const nextConfig = {
   reactStrictMode: true,
 
+  // opt into Turbopack explicitly
+  turbopack: {},
+
   webpack: (config) => {
     config.watchOptions = {
       ...(config.watchOptions || {}),
@@ -19,4 +22,3 @@ const nextConfig = {
 };
 
 export default nextConfig;
-

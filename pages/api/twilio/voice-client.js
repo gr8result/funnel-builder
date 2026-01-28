@@ -1,185 +1,133 @@
 // /pages/api/twilio/voice-client.js
 // FULL REPLACEMENT
 //
-<<<<<<< HEAD
-// ✅ TwiML webhook for outgoing calls from Twilio Voice SDK
-// ✅ Always returns valid TwiML (prevents 31005 "gateway hangup")
+// ✅ Fixes "Missing destination number" (reads To from query OR POST body)
+// ✅ Fixes Twilio error 31214 ("valid callerId must be provided") by setting <Dial callerId="...">
+// ✅ Supports outbound recording (record=1)
+// ✅ Sends statusCallback to /api/twilio/callback-status (your existing file)
+// ✅ Passes lead_id along (as query param to status callback)
 //
-// Required env:
-//  TWILIO_CALLER_ID=+61...
-=======
-// ✅ ABSOLUTE recordingStatusCallback URL (Twilio requires absolute)
-// ✅ Creates/updates crm_calls immediately (so callback can attach)
-// ✅ Passes lead_id + user_id through to callback
-// ✅ Records from answer (outbound SDK)
-// ✅ Retry-safe (upsert by twilio_sid)
+// ENV REQUIRED:
+//   PUBLIC_BASE_URL (or TWILIO_WEBHOOK_URL for ngrok)
+//   TWILIO_CALLER_ID   (MUST be your Twilio number, E.164, e.g. +61468048115)
+// Optional:
+//   DEFAULT_COUNTRY=AU (not required)
 //
-// ENV optional (recommended):
-//   APP_BASE_URL=https://yourdomain.com   (or your ngrok/Cloudflare/Vercel URL)
->>>>>>> 524cfe9 (WIP: autoresponder + automation + sms fixes)
+// IMPORTANT:
+// - TWILIO_CALLER_ID must be a Twilio-owned (or verified) caller ID enabled for outbound.
+// - This is what fixes the hangup after ~1 ring.
 
-import { createClient } from "@supabase/supabase-js";
+export const config = {
+  api: { bodyParser: true }, // Twilio often POSTs x-www-form-urlencoded
+};
 
-<<<<<<< HEAD
-=======
-const SUPABASE_URL =
-  process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL;
-
-const SERVICE_KEY =
-  process.env.SUPABASE_SERVICE_ROLE_KEY ||
-  process.env.SUPABASE_SERVICE_ROLE ||
-  process.env.SUPABASE_SERVICE_KEY;
-
->>>>>>> 524cfe9 (WIP: autoresponder + automation + sms fixes)
 function s(v) {
   return String(v ?? "").trim();
 }
 
-<<<<<<< HEAD
-function getParam(req, key) {
-  const b = req.body || {};
-  const q = req.query || {};
-  return s(b[key] ?? q[key]);
+function escapeXml(v) {
+  return s(v)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
 }
 
-function looksLikeE164(num) {
-  return /^\+\d{8,15}$/.test(num);
-=======
-function normPhone(v) {
-  return s(v).replace(/[^\d+]/g, "");
+function pickFirst(...vals) {
+  for (const v of vals) {
+    const t = s(v);
+    if (t) return t;
+  }
+  return "";
 }
 
-function getParam(req, key) {
-  const q = req.query || {};
-  const b = req.body || {};
-  return s(q[key] ?? b[key]);
-}
-
-function twiml(inner) {
-  return `<?xml version="1.0" encoding="UTF-8"?><Response>${inner}</Response>`;
-}
-
-function baseUrl(req) {
-  const envBase = s(process.env.APP_BASE_URL);
-  if (envBase) return envBase.replace(/\/+$/, "");
-  const proto =
-    s(req.headers["x-forwarded-proto"]) ||
-    (req.socket?.encrypted ? "https" : "http");
-  const host =
-    s(req.headers["x-forwarded-host"]) ||
-    s(req.headers.host) ||
-    "localhost:3000";
-  return `${proto}://${host}`.replace(/\/+$/, "");
->>>>>>> 524cfe9 (WIP: autoresponder + automation + sms fixes)
+function normalizePhone(raw) {
+  let v = s(raw);
+  if (!v) return "";
+  v = v.replace(/[^\d+]/g, "");
+  if (!v.startsWith("+") && v.startsWith("61")) v = "+" + v;
+  if (!v.startsWith("+") && v.startsWith("0") && v.length >= 9) v = "+61" + v.slice(1);
+  return v;
 }
 
 export default async function handler(req, res) {
   try {
-<<<<<<< HEAD
-    const callerId = s(process.env.TWILIO_CALLER_ID);
-    const To = getParam(req, "To") || getParam(req, "to");
-    const record = getParam(req, "record");
+    const q = req.query || {};
+    const b = req.body || {};
 
-    const vr = new twilio.twiml.VoiceResponse();
+    // Destination number can arrive in query OR body, and sometimes in different keys.
+    const rawTo = pickFirst(q.To, b.To, q.to, b.to, q.phone, b.phone, q.destination, b.destination);
+    const to = normalizePhone(rawTo);
 
-    if (!callerId || !looksLikeE164(callerId)) {
-      vr.say({ voice: "alice" }, "Missing caller I D.");
-      vr.hangup();
-      res.setHeader("Content-Type", "text/xml");
-      return res.status(200).send(vr.toString());
-    }
+    // REQUIRED caller ID for PSTN calls from Twilio Client
+    const callerIdRaw = pickFirst(
+      process.env.TWILIO_CALLER_ID,
+      process.env.TWILIO_CALLERID,
+      process.env.TWILIO_FROM_NUMBER
+    );
+    const callerId = normalizePhone(callerIdRaw);
 
-    if (!To || !looksLikeE164(To)) {
-      vr.say({ voice: "alice" }, "Invalid destination number.");
-      vr.hangup();
-      res.setHeader("Content-Type", "text/xml");
-      return res.status(200).send(vr.toString());
-    }
+    const leadId = pickFirst(q.lead_id, b.lead_id, q.leadId, b.leadId);
+    const record = pickFirst(q.record, b.record, "1") === "1";
 
-    const dial = vr.dial({ callerId });
+    const base = pickFirst(process.env.PUBLIC_BASE_URL, process.env.TWILIO_WEBHOOK_URL);
+    const statusCallbackBase = base ? `${base}/api/twilio/callback-status` : "";
 
-    const wantRecord =
-      record === "1" || record === "true" || record === "yes";
-
-    if (wantRecord) dial.number({ record: "record-from-answer" }, To);
-    else dial.number(To);
-
-    res.setHeader("Content-Type", "text/xml");
-    return res.status(200).send(vr.toString());
-  } catch (e) {
-    console.error("[/api/twilio/voice-client] error:", e);
-    const vr = new twilio.twiml.VoiceResponse();
-    vr.say({ voice: "alice" }, "Application error.");
-    vr.hangup();
-    res.setHeader("Content-Type", "text/xml");
-    return res.status(200).send(vr.toString());
-=======
-    if (!SUPABASE_URL || !SERVICE_KEY) {
-      res.setHeader("Content-Type", "text/xml");
-      return res.status(200).send(twiml("<Say>Server misconfigured.</Say>"));
-    }
-
-    const supabase = createClient(SUPABASE_URL, SERVICE_KEY, {
-      auth: { persistSession: false },
-    });
-
-    const toRaw = getParam(req, "To");
-    const to = normPhone(toRaw);
-    const leadId = getParam(req, "lead_id") || getParam(req, "leadId");
-    const userId = getParam(req, "user_id") || getParam(req, "userId");
-
-    const callSid = getParam(req, "CallSid");
-    const from = normPhone(getParam(req, "From") || getParam(req, "Caller"));
-
+    // Validate
     if (!to) {
       res.setHeader("Content-Type", "text/xml");
-      return res
-        .status(200)
-        .send(twiml("<Say>Missing destination number.</Say>"));
-    }
-
-    // Create/Upsert crm_calls row NOW
-    if (callSid) {
-      await supabase.from("crm_calls").upsert(
-        {
-          twilio_sid: callSid,
-          lead_id: leadId || null,
-          user_id: userId || null,
-          direction: "outbound",
-          from_number: from || null,
-          to_number: to || null,
-          status: "in_progress",
-          unread: true,
-        },
-        { onConflict: "twilio_sid" }
+      return res.status(200).send(
+        `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say>Missing destination number.</Say>
+</Response>`
       );
     }
 
-    const qs = new URLSearchParams();
-    if (leadId) qs.set("lead_id", leadId);
-    if (userId) qs.set("user_id", userId);
+    if (!callerId) {
+      res.setHeader("Content-Type", "text/xml");
+      return res.status(200).send(
+        `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say>Missing caller ID.</Say>
+</Response>`
+      );
+    }
 
-    const cbAbsolute =
-      `${baseUrl(req)}/api/twilio/recording-callback` +
-      (qs.toString() ? `?${qs.toString()}` : "");
+    // Build status callback URL (include lead_id if present)
+    const statusCallback =
+      statusCallbackBase && leadId
+        ? `${statusCallbackBase}?lead_id=${encodeURIComponent(s(leadId))}`
+        : statusCallbackBase;
 
-    const xml =
-      `<Dial ` +
-      `record="record-from-answer" ` +
-      `recordingStatusCallback="${cbAbsolute}" ` +
-      `recordingStatusCallbackEvent="completed" ` +
-      `recordingStatusCallbackMethod="POST">` +
-      `<Number>${to}</Number>` +
-      `</Dial>`;
+    // Dial attributes
+    const dialAttrs = [];
+    dialAttrs.push(`callerId="${escapeXml(callerId)}"`); // ✅ THIS FIXES 31214
+    if (record) dialAttrs.push(`record="record-from-answer"`);
+    if (statusCallback) {
+      dialAttrs.push(`statusCallback="${escapeXml(statusCallback)}"`);
+      dialAttrs.push(`statusCallbackMethod="POST"`);
+      dialAttrs.push(`statusCallbackEvent="initiated ringing answered completed"`);
+    }
 
     res.setHeader("Content-Type", "text/xml");
-    return res.status(200).send(twiml(xml));
+    return res.status(200).send(
+      `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Dial ${dialAttrs.join(" ")}>
+    <Number>${escapeXml(to)}</Number>
+  </Dial>
+</Response>`
+    );
   } catch (e) {
-    console.error("[voice-client]", e);
+    console.error("voice-client error:", e);
     res.setHeader("Content-Type", "text/xml");
-    return res
-      .status(200)
-      .send(twiml("<Say>Sorry, the call could not be completed.</Say>"));
->>>>>>> 524cfe9 (WIP: autoresponder + automation + sms fixes)
+    return res.status(200).send(
+      `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say>Server error.</Say>
+</Response>`
+    );
   }
 }
