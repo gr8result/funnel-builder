@@ -6,7 +6,7 @@
     },
     {
       "path": "/api/email/autoresponders/process-queue?key=c1ae7bf64e1173572ebddde70789919bf457975eae044dc1413654e5ac524645",
-      "schedule": "*/5 * * * *"
+      "schedule": "0 0 * * *"
     }
   ]
 }
