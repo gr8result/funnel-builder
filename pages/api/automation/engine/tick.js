@@ -1,22 +1,4 @@
 // /pages/api/automation/engine/tick.js
-<<<<<<< HEAD
-// FULL REPLACEMENT — tolerant to current_node_id vs current_node
-//
-// ✅ Auth via:
-//    - header: x-cron-key: <secret>
-//    - OR Authorization: Bearer <secret>
-//    - OR query: ?key=<secret>
-// ✅ Loads members, ensures runs exist
-// ✅ Sends emails for "email" nodes (HTML from Storage)
-// ✅ Advances to next node
-// ✅ Works even if your runs table uses current_node_id OR current_node
-//
-// ENV required:
-//  - NEXT_PUBLIC_SUPABASE_URL (or SUPABASE_URL)
-//  - SUPABASE_SERVICE_ROLE_KEY (or variants)
-//  - SENDGRID_API_KEY (or GR8_MAIL_SEND_ONLY)
-//  - AUTOMATION_CRON_SECRET (or AUTOMATION_CRON_KEY / CRON_SECRET)
-=======
 // FULL REPLACEMENT — fixes TENANT_MISMATCH and makes runs use lead.user_id (source of truth)
 //
 // ✅ Auth via:
@@ -37,7 +19,6 @@
 // Optional:
 //  - DEFAULT_FROM_EMAIL
 //  - DEFAULT_FROM_NAME
->>>>>>> 524cfe9 (WIP: autoresponder + automation + sms fixes)
 
 import sgMail from "@sendgrid/mail";
 import { createClient } from "@supabase/supabase-js";
@@ -58,29 +39,6 @@ const CRON_SECRET =
 
 function getSendGridKey() {
   return (process.env.SENDGRID_API_KEY || process.env.GR8_MAIL_SEND_ONLY || "").trim();
-<<<<<<< HEAD
-}
-
-function okAuth(req) {
-  const h = (req.headers.authorization || "").trim();
-  const bearer = h.toLowerCase().startsWith("bearer ") ? h.slice(7).trim() : "";
-  const q = (req.query.key || "").toString().trim();
-  const x = (req.headers["x-cron-key"] || "").toString().trim();
-  const secret = CRON_SECRET;
-  if (!secret) return true;
-  return bearer === secret || q === secret || x === secret;
-}
-
-function safeJson(v, fallback) {
-  if (!v) return fallback;
-  if (typeof v === "object") return v;
-  try {
-    return JSON.parse(v);
-  } catch {
-    return fallback;
-  }
-=======
->>>>>>> 524cfe9 (WIP: autoresponder + automation + sms fixes)
 }
 
 function okAuth(req) {
@@ -93,59 +51,6 @@ function okAuth(req) {
   return bearer === secret || q === secret || x === secret;
 }
 
-<<<<<<< HEAD
-function nowIso() {
-  return new Date().toISOString();
-}
-
-async function loadHtmlFromStorage(supabase, bucket, path) {
-  const { data, error } = await supabase.storage.from(bucket).download(path);
-  if (error || !data) throw new Error(`STORAGE_DOWNLOAD_FAILED: ${error?.message || "no data"}`);
-  return await data.text();
-}
-
-function findStartNodeId(nodes, edges) {
-  const trigger = (nodes || []).find((n) => (n?.type || "").toLowerCase() === "trigger");
-  if (trigger?.id) return trigger.id;
-
-  const incoming = new Set((edges || []).map((e) => e?.target).filter(Boolean));
-  const first = (nodes || []).find((n) => n?.id && !incoming.has(n.id));
-  return first?.id || (nodes?.[0]?.id ?? null);
-}
-
-function nextFrom(nodeId, edges) {
-  const e = (edges || []).find((x) => x.source === nodeId);
-  return e?.target || null;
-}
-
-// --- DB helpers: tolerate current_node_id vs current_node
-function withCurrentNode(row, nodeId, mode) {
-  // mode: "id" => current_node_id, "name" => current_node
-  if (mode === "id") return { ...row, current_node_id: nodeId };
-  return { ...row, current_node: nodeId };
-}
-
-async function insertRunTolerant(supabase, baseRow, startNodeId) {
-  const variants = [
-    withCurrentNode(baseRow, startNodeId, "id"),
-    withCurrentNode(baseRow, startNodeId, "name"),
-  ];
-
-  let lastErr = null;
-
-  for (const row of variants) {
-    const { error } = await supabase.from("automation_flow_runs").insert(row);
-    if (!error) return { ok: true, used: row.current_node_id ? "current_node_id" : "current_node" };
-
-    const m = msg(error).toLowerCase();
-    if (m.includes("column") && m.includes("does not exist")) {
-      lastErr = error;
-      continue; // try other variant
-    }
-
-    lastErr = error;
-    break;
-=======
 function safeJson(v, fallback) {
   if (!v) return fallback;
   if (typeof v === "object") return v;
@@ -153,54 +58,9 @@ function safeJson(v, fallback) {
     return JSON.parse(v);
   } catch {
     return fallback;
->>>>>>> 524cfe9 (WIP: autoresponder + automation + sms fixes)
   }
-
-  return { ok: false, error: msg(lastErr) };
 }
 
-<<<<<<< HEAD
-async function selectRunsTolerant(supabase, flow_id, max) {
-  // Try select with current_node_id first, then fallback to current_node
-  const tries = [
-    "id, lead_id, user_id, current_node_id, available_at, status",
-    "id, lead_id, user_id, current_node, available_at, status",
-  ];
-
-  for (const sel of tries) {
-    const { data, error } = await supabase
-      .from("automation_flow_runs")
-      .select(sel)
-      .eq("flow_id", flow_id)
-      .eq("status", "pending")
-      .lte("available_at", nowIso())
-      .limit(max);
-
-    if (!error) {
-      const mode = sel.includes("current_node_id") ? "id" : "name";
-      return { ok: true, data: data || [], mode };
-    }
-
-    const m = msg(error).toLowerCase();
-    if (m.includes("column") && m.includes("does not exist")) continue;
-    return { ok: false, error: msg(error) };
-  }
-
-  return { ok: false, error: "RUNS_LOAD_FAILED: no current_node column found" };
-}
-
-async function updateRunTolerant(supabase, runId, patch, currentNodeMode) {
-  // patch may include "current_node_value" special key; we convert it
-  const out = { ...patch };
-  if ("current_node_value" in out) {
-    const v = out.current_node_value;
-    delete out.current_node_value;
-    Object.assign(out, currentNodeMode === "id" ? { current_node_id: v } : { current_node: v });
-  }
-
-  const { error } = await supabase.from("automation_flow_runs").update(out).eq("id", runId);
-  if (error) throw new Error(msg(error));
-=======
 async function loadHtmlFromStorage(supabase, bucket, path) {
   const { data, error } = await supabase.storage.from(bucket).download(path);
   if (error || !data) throw new Error(`STORAGE_DOWNLOAD_FAILED: ${error?.message || "no data"}`);
@@ -221,7 +81,65 @@ function findStartNodeId(nodes, edges) {
 function nextFrom(nodeId, edges) {
   const e = (edges || []).find((x) => x.source === nodeId);
   return e?.target || null;
->>>>>>> 524cfe9 (WIP: autoresponder + automation + sms fixes)
+}
+
+function nextFromLabel(nodeId, edges, label) {
+  const e = (edges || []).find((x) => x.source === nodeId && x.label === label);
+  return e?.target || null;
+}
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+async function insertRunTolerant(supabase, baseRow, startNodeId) {
+  try {
+    const row = { ...baseRow, current_node_id: startNodeId };
+    const { error } = await supabase.from("automation_flow_runs").insert([row]);
+    if (error) return { ok: false, error: error.message };
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: String(e?.message || e) };
+  }
+}
+
+async function selectRunsTolerant(supabase, flow_id, max) {
+  try {
+    const { data, error } = await supabase
+      .from("automation_flow_runs")
+      .select("id, lead_id, current_node_id, status, available_at, user_id")
+      .eq("flow_id", flow_id)
+      .eq("status", "pending")
+      .lte("available_at", nowIso())
+      .order("available_at", { ascending: true })
+      .limit(max);
+
+    if (error) return { ok: false, error: error.message, data: null, mode: "id" };
+    return { ok: true, data: data || [], mode: "id" };
+  } catch (e) {
+    return { ok: false, error: String(e?.message || e), data: null, mode: "id" };
+  }
+}
+
+async function updateRunTolerant(supabase, runId, updates, mode) {
+  try {
+    // Handle both current_node and current_node_id modes
+    const updateData = { ...updates };
+    if (updates.current_node !== undefined && mode === "name") {
+      updateData.current_node_id = updates.current_node;
+      delete updateData.current_node;
+    }
+
+    const { error } = await supabase
+      .from("automation_flow_runs")
+      .update(updateData)
+      .eq("id", runId);
+
+    if (error) return { ok: false, error: error.message };
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: String(e?.message || e) };
+  }
 }
 
 export default async function handler(req, res) {
@@ -237,11 +155,7 @@ export default async function handler(req, res) {
   const debug = {
     flow_id,
     max,
-<<<<<<< HEAD
-    now: nowIso(),
-=======
     now: new Date().toISOString(),
->>>>>>> 524cfe9 (WIP: autoresponder + automation + sms fixes)
     armed,
     members_seen: 0,
     runs_created: 0,
@@ -255,22 +169,18 @@ export default async function handler(req, res) {
   };
 
   try {
-<<<<<<< HEAD
-    if (!flow_id) return res.status(400).json({ ok: false, error: "Missing flow_id", debug });
-
-    const sgKey = getSendGridKey();
-    if (!sgKey) return res.status(500).json({ ok: false, error: "Missing SendGrid API key", debug });
-=======
     if (!flow_id) {
       return res.status(400).json({ ok: false, error: "Missing flow_id", debug });
     }
 
+    // SendGrid key is OPTIONAL for tick processing now.
+    // We only need it when actually sending emails; queueing does not require it.
     const sgKey = getSendGridKey();
-    if (!sgKey) {
-      return res.status(500).json({ ok: false, error: "Missing SendGrid API key", debug });
+    if (sgKey) {
+      try { sgMail.setApiKey(sgKey); } catch {}
+    } else {
+      debug.notes.push("No SendGrid key — will queue only, not send");
     }
->>>>>>> 524cfe9 (WIP: autoresponder + automation + sms fixes)
-    sgMail.setApiKey(sgKey);
 
     // Load flow
     const { data: flow, error: flowErr } = await supabase
@@ -286,14 +196,6 @@ export default async function handler(req, res) {
     const nodes = safeJson(flow.nodes, []);
     const edges = safeJson(flow.edges, []);
     const startNodeId = findStartNodeId(nodes, edges);
-<<<<<<< HEAD
-    if (!startNodeId) return res.status(500).json({ ok: false, error: "Flow has no start node", debug });
-
-    // Members
-    const { data: members, error: memErr } = await supabase
-      .from("automation_flow_members")
-      .select("id, lead_id")
-=======
     if (!startNodeId) {
       return res.status(500).json({ ok: false, error: "Flow has no start node", debug });
     }
@@ -302,22 +204,12 @@ export default async function handler(req, res) {
     const { data: members, error: memErr } = await supabase
       .from("automation_flow_members")
       .select("id, lead_id, flow_id")
->>>>>>> 524cfe9 (WIP: autoresponder + automation + sms fixes)
       .eq("flow_id", flow_id)
       .limit(max);
 
     if (memErr) throw new Error(`MEMBERS_LOAD_FAILED: ${memErr.message}`);
     debug.members_seen = members?.length || 0;
 
-<<<<<<< HEAD
-    // Ensure a run exists per member
-    for (const m of members || []) {
-      if (!m.lead_id) continue;
-
-      const { data: lead, error: leadErr } = await supabase
-        .from("leads")
-        .select("id, user_id, email, name")
-=======
     // Ensure a run exists per member (without creating wrong user_id)
     for (const m of members || []) {
       if (!m.lead_id) continue;
@@ -326,7 +218,6 @@ export default async function handler(req, res) {
       const { data: lead, error: leadErr } = await supabase
         .from("leads")
         .select("id, user_id, email")
->>>>>>> 524cfe9 (WIP: autoresponder + automation + sms fixes)
         .eq("id", m.lead_id)
         .single();
 
@@ -334,7 +225,7 @@ export default async function handler(req, res) {
         debug.errors.push(`LEAD_LOAD_FAILED ${m.lead_id}: ${leadErr?.message || "no lead/user_id"}`);
         continue;
       }
-<<<<<<< HEAD
+
 
       // Does run exist already?
       const { data: existing, error: exErr } = await supabase
@@ -370,163 +261,6 @@ export default async function handler(req, res) {
     const currentNodeMode = runsOut.mode; // "id" or "name"
     debug.picked = runs.length;
 
-    for (const r of runs) {
-      debug.processed += 1;
-
-      const currentNodeId = currentNodeMode === "id" ? r.current_node_id : r.current_node;
-
-      const { data: lead, error: leadErr } = await supabase
-        .from("leads")
-        .select("id, user_id, email, name")
-        .eq("id", r.lead_id)
-        .single();
-
-      if (leadErr || !lead?.email) {
-        debug.failed += 1;
-        await updateRunTolerant(supabase, r.id, {
-          status: "failed",
-          last_error: `LEAD_LOAD_FAILED: ${leadErr?.message || "missing email"}`,
-        }, currentNodeMode);
-        continue;
-      }
-
-      const node = (nodes || []).find((n) => n?.id === currentNodeId);
-      if (!node) {
-        debug.failed += 1;
-        await updateRunTolerant(supabase, r.id, {
-          status: "failed",
-          last_error: "NODE_NOT_FOUND",
-        }, currentNodeMode);
-        continue;
-      }
-
-      const nodeType = String(node.type || "").toLowerCase();
-      const nodeData = node.data || {};
-
-      try {
-        if (!armed) {
-          // dry-run mode
-          await updateRunTolerant(supabase, r.id, { last_error: null }, currentNodeMode);
-          debug.notes.push(`Dry-run: would process node ${node.id} (${nodeType})`);
-          continue;
-        }
-
-        if (nodeType.includes("email")) {
-          const bucket = String(nodeData.bucket || nodeData.storage_bucket || "email-user-assets");
-          const path = String(nodeData.html_path || nodeData.storage_path || nodeData.path || "");
-
-          if (!path) throw new Error("EMAIL_NODE_MISSING_HTML_PATH");
-
-          const html = await loadHtmlFromStorage(supabase, bucket, path);
-
-          const fromEmail = (process.env.DEFAULT_FROM_EMAIL || "").trim() || "no-reply@gr8result.com";
-          const fromName = (process.env.DEFAULT_FROM_NAME || "").trim() || "GR8 RESULT";
-          const subject = String(nodeData.subject || "Check-in");
-
-          await sgMail.send({
-            to: lead.email,
-            from: { email: fromEmail, name: fromName },
-            subject,
-            html,
-          });
-
-          debug.sent += 1;
-
-          const next = nextFrom(node.id, edges);
-          if (!next) {
-            await updateRunTolerant(supabase, r.id, {
-              status: "done",
-              current_node_value: null,
-              last_error: null,
-            }, currentNodeMode);
-          } else {
-            await updateRunTolerant(supabase, r.id, {
-              status: "pending",
-              current_node_value: next,
-              available_at: nowIso(),
-              last_error: null,
-            }, currentNodeMode);
-            debug.advanced += 1;
-          }
-        } else if (nodeType.includes("delay")) {
-          const minutes = parseInt(nodeData.minutes || nodeData.delay_minutes || "1", 10) || 1;
-          const when = new Date(Date.now() + minutes * 60 * 1000).toISOString();
-          const next = nextFrom(node.id, edges);
-
-          await updateRunTolerant(supabase, r.id, {
-            status: next ? "pending" : "done",
-            current_node_value: next || null,
-            available_at: when,
-            last_error: null,
-          }, currentNodeMode);
-
-          debug.advanced += 1;
-        } else {
-          const next = nextFrom(node.id, edges);
-          await updateRunTolerant(supabase, r.id, {
-            status: next ? "pending" : "done",
-            current_node_value: next || null,
-            available_at: nowIso(),
-            last_error: null,
-          }, currentNodeMode);
-          debug.advanced += 1;
-        }
-      } catch (e) {
-        debug.failed += 1;
-        await updateRunTolerant(supabase, r.id, {
-          status: "failed",
-          last_error: String(e?.message || e),
-        }, currentNodeMode);
-      }
-    }
-
-=======
-
-      // run already?
-      const { data: existing } = await supabase
-        .from("automation_flow_runs")
-        .select("id, user_id")
-        .eq("flow_id", flow_id)
-        .eq("lead_id", m.lead_id)
-        .maybeSingle();
-
-      if (!existing) {
-        const { error: insErr } = await supabase.from("automation_flow_runs").insert({
-          flow_id,
-          lead_id: m.lead_id,
-          user_id: lead.user_id, // ✅ SOURCE OF TRUTH
-          status: "pending",
-          current_node: startNodeId,
-          available_at: new Date().toISOString(),
-          last_error: null,
-        });
-
-        if (insErr) debug.errors.push(`RUN_CREATE_FAILED ${m.lead_id}: ${insErr.message}`);
-        else debug.runs_created += 1;
-      } else if (existing.user_id !== lead.user_id) {
-        // ✅ Repair wrong user_id instead of failing forever
-        const { error: upErr } = await supabase
-          .from("automation_flow_runs")
-          .update({ user_id: lead.user_id, last_error: null })
-          .eq("id", existing.id);
-
-        if (upErr) debug.errors.push(`RUN_REPAIR_FAILED ${m.lead_id}: ${upErr.message}`);
-        else debug.notes.push(`Repaired run.user_id for lead ${m.lead_id}`);
-      }
-    }
-
-    // Pick runs ready to process
-    const { data: runs, error: runErr } = await supabase
-      .from("automation_flow_runs")
-      .select("id, lead_id, user_id, current_node, available_at, status")
-      .eq("flow_id", flow_id)
-      .eq("status", "pending")
-      .lte("available_at", new Date().toISOString())
-      .limit(max);
-
-    if (runErr) throw new Error(`RUNS_LOAD_FAILED: ${runErr.message}`);
-    debug.picked = runs?.length || 0;
-
     for (const r of runs || []) {
       debug.processed += 1;
 
@@ -538,10 +272,12 @@ export default async function handler(req, res) {
         .single();
 
       if (leadErr || !lead?.email) {
+        const msg = `LEAD_LOAD_FAILED: ${leadErr?.message || "missing email"}`;
         debug.failed += 1;
+        debug.errors.push(msg);
         await supabase.from("automation_flow_runs").update({
           status: "failed",
-          last_error: `LEAD_LOAD_FAILED: ${leadErr?.message || "missing email"}`,
+          last_error: msg,
         }).eq("id", r.id);
         continue;
       }
@@ -554,9 +290,30 @@ export default async function handler(req, res) {
         }).eq("id", r.id);
       }
 
-      const node = (nodes || []).find((n) => n.id === r.current_node);
+      // Fetch account information for the user to get their name/company
+      const { data: account, error: accountErr } = await supabase
+        .from("accounts")
+        .select("id, user_id, business_name, full_name, name")
+        .eq("user_id", r.user_id)
+        .maybeSingle();
+
+      if (accountErr) {
+        debug.errors.push(`ACCOUNT_LOAD_FAILED ${r.user_id}: ${accountErr.message}`);
+      }
+
+      // Initialize current_node_id if null
+      let currentNodeId = r.current_node_id;
+      if (!currentNodeId) {
+        currentNodeId = startNodeId;
+        await supabase.from("automation_flow_runs").update({
+          current_node_id: startNodeId,
+        }).eq("id", r.id);
+      }
+
+      const node = (nodes || []).find((n) => n.id === currentNodeId);
       if (!node) {
         debug.failed += 1;
+        debug.errors.push("NODE_NOT_FOUND");
         await supabase.from("automation_flow_runs").update({
           status: "failed",
           last_error: "NODE_NOT_FOUND",
@@ -566,50 +323,115 @@ export default async function handler(req, res) {
 
       const nodeType = (node.type || "").toLowerCase();
       const nodeData = node.data || {};
+      debug.notes.push(`RUN ${r.id} at node ${currentNodeId} (${nodeType})`);
 
       try {
         if (nodeType.includes("email")) {
-          // nodeData should contain bucket/path or a reference
-          const bucket = (nodeData.bucket || nodeData.storage_bucket || "email-user-assets").toString();
-          const path =
-            (nodeData.html_path ||
-              nodeData.storage_path ||
-              nodeData.path ||
-              "").toString();
+          let html = "";
+          let subject = (nodeData.subject || nodeData.label || "Check-in").toString();
+          let bucket = (nodeData.bucket || nodeData.storage_bucket || "email-user-assets").toString();
+          let path = "";
 
-          if (!path) throw new Error("EMAIL_NODE_MISSING_HTML_PATH");
+          // PRIORITY 1: Check if node has htmlPath or storagePath (direct HTML file path)
+          path = nodeData.htmlPath || nodeData.storagePath || nodeData.html_path || nodeData.storage_path || "";
+          
+          if (path) {
+            // Load HTML from storage using the direct path
+            html = await loadHtmlFromStorage(supabase, bucket, path);
+            
+            if (!html) {
+              throw new Error(`EMAIL_STORAGE_LOAD_FAILED: bucket=${bucket}, path=${path}`);
+            }
+          } else {
+            // FALLBACK 1: Try to extract from emailPreviewUrl and change .png to .html
+            const previewUrl = nodeData.emailPreviewUrl || nodeData.preview_url || "";
+            if (previewUrl && previewUrl.includes('/storage/')) {
+              const match = previewUrl.match(/\/storage\/v1\/object\/public\/([^/]+)\/(.+\.png)$/);
+              if (match) {
+                bucket = match[1];
+                // Change .png to .html
+                path = match[2].replace(/\.png$/, '.html');
+                try {
+                  html = await loadHtmlFromStorage(supabase, bucket, path);
+                } catch (err) {
+                  debug.notes.push(`Failed to load HTML from preview URL: ${err.message}`);
+                  html = "";
+                }
+              }
+            }
+            
+            // FALLBACK 2: lookup by emailId
+            if (!html) {
+              const emailId = nodeData.emailId || nodeData.email_id || "";
+              if (!emailId) {
+                throw new Error(`EMAIL_NODE_MISSING_ID_AND_URL: nodeData keys: ${Object.keys(nodeData).join(', ')}`);
+              }
 
-          const html = await loadHtmlFromStorage(supabase, bucket, path);
+              const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(emailId);
 
-          // From identity — keep it simple + safe (don’t depend on accounts.company_name etc.)
-          const fromEmail =
-            (process.env.DEFAULT_FROM_EMAIL || "").trim() || "no-reply@gr8result.com";
-          const fromName =
-            (process.env.DEFAULT_FROM_NAME || "").trim() || "GR8 RESULT";
+              const { data: tmpl, error: tmplErr } = await supabase
+                .from("email_templates")
+                .select("*")
+                .eq(isUUID ? "id" : "name", emailId)
+                .maybeSingle();
 
-          const subject = (nodeData.subject || "Check-in").toString();
+              if (tmplErr || !tmpl) {
+                throw new Error(`EMAIL_RECORD_NOT_FOUND: ${emailId} - ${tmplErr?.message || "not found"}`);
+              }
 
-          await sgMail.send({
-            to: lead.email,
-            from: { email: fromEmail, name: fromName },
-            subject,
-            html,
-          });
+              html = tmpl.html || tmpl.html_content || tmpl.content || tmpl.body || tmpl.template_html || "";
+              subject = tmpl.subject || tmpl.title || tmpl.name || subject;
+              path = tmpl.html_path || tmpl.storage_path || tmpl.path || tmpl.file_path || "";
+              bucket = tmpl.bucket || tmpl.storage_bucket || bucket;
 
-          debug.sent += 1;
+              if (!html && path) {
+                html = await loadHtmlFromStorage(supabase, bucket, path);
+              }
 
-          // Advance to next node
-          const next = nextFrom(r.current_node, edges);
+              if (!html) {
+                throw new Error(`EMAIL_NO_HTML_CONTENT: emailId=${emailId}, available keys: ${Object.keys(tmpl).join(', ')}`);
+              }
+            }
+          }
+
+          // QUEUE the email - Base64 encode HTML to avoid escape issues
+          try {
+            // Convert HTML to base64 to avoid any Unicode escape sequence issues
+            const htmlBase64 = Buffer.from(html || '', 'utf8').toString('base64');
+            
+            const { error: qInsertErr } = await supabase.from("automation_email_queue").insert({
+              user_id: r.user_id,
+              flow_id: flow_id,
+              node_id: currentNodeId,
+              lead_id: r.lead_id,
+              to_email: lead.email,
+              subject: subject,
+              html_content: htmlBase64,  // Store as base64
+              variant: nodeData.label || subject,
+              status: "pending",
+            });
+            if (qInsertErr) {
+              debug.errors.push(`Queue insert failed: ${qInsertErr.message}`);
+            } else {
+              debug.sent += 1;
+            }
+          } catch (qErr) {
+            debug.errors.push(`Queue error: ${qErr?.message}`);
+          }
+
+          // Move to next node (email sent, advance)
+          const next = nextFrom(currentNodeId, edges);
           if (!next) {
             await supabase.from("automation_flow_runs").update({
               status: "done",
-              current_node: null,
+              current_node_id: null,
+              available_at: new Date().toISOString(),
               last_error: null,
             }).eq("id", r.id);
           } else {
             await supabase.from("automation_flow_runs").update({
               status: "pending",
-              current_node: next,
+              current_node_id: next,
               available_at: new Date().toISOString(),
               last_error: null,
             }).eq("id", r.id);
@@ -619,37 +441,165 @@ export default async function handler(req, res) {
           // delay node: wait N minutes then advance
           const minutes = parseInt(nodeData.minutes || nodeData.delay_minutes || "1", 10) || 1;
           const when = new Date(Date.now() + minutes * 60 * 1000).toISOString();
-          const next = nextFrom(r.current_node, edges);
+          const next = nextFrom(currentNodeId, edges);
 
           await supabase.from("automation_flow_runs").update({
             status: next ? "pending" : "done",
-            current_node: next,
+            current_node_id: next,
             available_at: when,
+            last_error: null,
+          }).eq("id", r.id);
+
+          debug.advanced += 1;
+        } else if (nodeType.includes("condition")) {
+          // Condition node: evaluate and pick the right branch based on condition type
+          const condition = nodeData.condition || {};
+          const conditionType = condition.type || "";
+          
+          let shouldTakeYesPath = true; // default to yes
+          let shouldWait = false; // whether to delay before evaluating
+          
+          // Handle different condition types
+          if (conditionType === "email_opened") {
+            // For email_opened condition:
+            // 1. Check if there's a wait time (e.g., 1 day)
+            // 2. If wait time not yet elapsed, hold the run
+            // 3. If elapsed, check if email was opened
+            
+            const waitHours = parseInt(condition.waitHours || condition.hours_to_wait || "24", 10) || 24;
+            const waitTime = waitHours * 60 * 60 * 1000;
+            
+            // Get the most recent email sent to this lead in this flow
+            const { data: emailQueue, error: eqErr } = await supabase
+              .from("automation_email_queue")
+              .select("id, created_at, opened_at")
+              .eq("flow_id", flow_id)
+              .eq("lead_id", r.lead_id)
+              .order("created_at", { ascending: false })
+              .limit(1)
+              .maybeSingle();
+            
+            if (!eqErr && emailQueue) {
+              const sentTime = new Date(emailQueue.created_at).getTime();
+              const nowTime = Date.now();
+              const elapsedTime = nowTime - sentTime;
+              
+              if (elapsedTime < waitTime) {
+                // Wait time not yet elapsed, hold the run
+                const availableAt = new Date(sentTime + waitTime).toISOString();
+                await supabase.from("automation_flow_runs").update({
+                  status: "pending",
+                  current_node_id: currentNodeId,
+                  available_at: availableAt,
+                  last_error: null,
+                }).eq("id", r.id);
+                debug.advanced += 1;
+                continue;
+              } else {
+                // Wait time elapsed, check if email was opened
+                shouldTakeYesPath = !!emailQueue.opened_at;
+              }
+            }
+          } else if (conditionType === "tag_exists") {
+            // Check if lead has the tag
+            const tag = condition.tag || "";
+            if (tag) {
+              const { data: leadTags } = await supabase
+                .from("lead_tags")
+                .select("id")
+                .eq("lead_id", r.lead_id)
+                .eq("tag", tag)
+                .maybeSingle();
+              shouldTakeYesPath = !!leadTags;
+            }
+          } else if (conditionType === "field_equals") {
+            // Check if lead field equals value
+            const field = condition.field || "";
+            const value = condition.value || "";
+            if (field && lead && value) {
+              shouldTakeYesPath = String(lead[field] || "") === String(value);
+            }
+          } else if (conditionType === "field_contains") {
+            // Check if lead field contains value
+            const field = condition.field || "";
+            const value = condition.value || "";
+            if (field && lead && value) {
+              shouldTakeYesPath = String(lead[field] || "").includes(String(value));
+            }
+          }
+          
+          // Determine which path to take
+          const yesPath = nextFromLabel(currentNodeId, edges, "yes");
+          const noPath = nextFromLabel(currentNodeId, edges, "no");
+          const nextPath = shouldTakeYesPath ? yesPath : noPath;
+          
+          if (nextPath) {
+            await supabase.from("automation_flow_runs").update({
+              status: "pending",
+              current_node_id: nextPath,
+              available_at: new Date().toISOString(),
+              last_error: null,
+            }).eq("id", r.id);
+            debug.advanced += 1;
+          } else {
+            await supabase.from("automation_flow_runs").update({
+              status: "done",
+              current_node_id: null,
+              last_error: null,
+            }).eq("id", r.id);
+          }
+        } else if (nodeType.includes("trigger")) {
+          // Trigger node: just advance to the next node (email, delay, etc.)
+          const next = nextFrom(currentNodeId, edges);
+          debug.notes.push(`TRIGGER ${currentNodeId} -> ${next || 'END'}`);
+          await supabase.from("automation_flow_runs").update({
+            status: next ? "pending" : "done",
+            current_node_id: next,
+            available_at: new Date().toISOString(),
             last_error: null,
           }).eq("id", r.id);
 
           debug.advanced += 1;
         } else {
           // unknown node: just advance
-          const next = nextFrom(r.current_node, edges);
+          const next = nextFrom(currentNodeId, edges);
           await supabase.from("automation_flow_runs").update({
             status: next ? "pending" : "done",
-            current_node: next,
+            current_node_id: next,
             available_at: new Date().toISOString(),
             last_error: null,
           }).eq("id", r.id);
+
           debug.advanced += 1;
         }
       } catch (e) {
+        const msg = String(e?.message || e);
         debug.failed += 1;
+        debug.errors.push(msg);
         await supabase.from("automation_flow_runs").update({
           status: "failed",
-          last_error: String(e?.message || e),
+          last_error: msg,
         }).eq("id", r.id);
       }
     }
 
->>>>>>> 524cfe9 (WIP: autoresponder + automation + sms fixes)
+    // Auto-flush queued emails after processing
+    if (debug.sent > 0) {
+      try {
+        const flushResponse = await fetch(`${process.env.NEXT_PUBLIC_SITE_URL || 'http://localhost:3000'}/api/automation/email/flush-queue`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-cron-key': CRON_SECRET || '',
+          },
+        });
+        const flushResult = await flushResponse.json();
+        debug.notes.push(`Auto-flushed: ${flushResult?.debug?.sent || 0} emails sent`);
+      } catch (flushErr) {
+        debug.errors.push(`Auto-flush failed: ${flushErr?.message || String(flushErr)}`);
+      }
+    }
+
     return res.status(200).json({ ok: true, debug });
   } catch (e) {
     debug.errors.push(String(e?.message || e));

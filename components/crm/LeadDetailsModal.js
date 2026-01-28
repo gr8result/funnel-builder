@@ -1,34 +1,25 @@
-// /components/crm/LeadDetailsModal.js
-// FULL REPLACEMENT
-//
-// ✅ Keeps LEFT dialer (BrowserDialer) intact
-<<<<<<< HEAD
-// ✅ Notes Timeline INSIDE Notes box (scrollable)
-// ✅ Audio recordings appear INSIDE Notes Timeline (not outside)
-// ✅ No SID/junk text in notes
-// ✅ Loads recordings from:
-//    1) /api/crm/lead-call-recordings?lead_id=...
-//    2) /api/twilio/list-call-recordings?phone=... (optional)
-// ✅ Audio playback uses:
-//    - /api/twilio/recording?sid=RE...
-//    - OR /api/twilio/recording-audio?url=...
-=======
-// ✅ REMOVES the big useless panel above Notes textarea (the one in your screenshot)
-// ✅ Shows REAL call recordings INSIDE the Notes section, in date order
-// ✅ Loads recordings from BOTH:
-//    1) Supabase table crm_calls (by lead_id)  <-- NOW via server API /api/crm/lead-call-recordings (service role)
-//    2) Twilio API /api/twilio/list-call-recordings?phone=...
-// ✅ Dedupes recordings so you don’t see doubles
-// ✅ Uses /api/twilio/recording?sid=RE... and /api/twilio/recording-audio?url=...
-// ✅ Cleans “Call recording ready...” junk from notes (on load + on save)
->>>>>>> 524cfe9 (WIP: autoresponder + automation + sms fixes)
-
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/router";
 import { supabase } from "../../utils/supabase-client";
 import LeadInfoCard from "./LeadInfoCard";
 import BrowserDialer from "../telephony/BrowserDialer";
 import SendToAutomationPanel from "./SendToAutomationPanel";
+
+/*
+  Full replacement: components/crm/LeadDetailsModal.js
+
+  Behavior:
+  - Single continuous timeline (notes + calls) newest-first.
+  - Editor (draft textarea) hidden by default; shown with "+ New note".
+  - Voice opens editor if closed, inserts transcription into draft at caret.
+  - Saving prepends draft into saved history (historyNotes), persists cleaned (stripCallJunk).
+  - Calls are imported from server API and from the crm_calls table. loadLeadCalls includes rows where:
+      * lead_id === lead.id OR
+      * from_number / to_number matches the lead phone (normalized)
+    and deduplicates by recording_sid / id / created_at.
+  - Polls for new calls every 10s while modal is open; also refreshes after recording stops and after saves.
+  - Audio players use either a sid-based proxy (/api/twilio/recording?sid=...) or url-proxy (/api/twilio/recording-audio?url=...).
+*/
 
 export default function LeadDetailsModal({
   isOpen,
@@ -42,13 +33,10 @@ export default function LeadDetailsModal({
   const router = useRouter();
   if (!isOpen || !lead) return null;
 
-  // -------------------- HELPERS --------------------
   const scaled = (v) => Math.round(v * fontScale);
+  const s = (v) => String(v ?? "").trim();
 
-  function s(v) {
-    return String(v ?? "").trim();
-  }
-
+  // ---------------- Helpers ----------------
   function normalizePhoneE164AU(raw) {
     let v = s(raw);
     if (!v) return "";
@@ -77,9 +65,10 @@ export default function LeadDetailsModal({
     if (value == null) return "";
     const n = Number(value);
     if (!Number.isFinite(n)) return "";
-    if (n < 60) return `${n}s`;
-    const m = Math.floor(n / 60);
-    const rem = n % 60;
+    const secs = Math.max(0, Math.round(n));
+    if (secs < 60) return `${secs}s`;
+    const m = Math.floor(secs / 60);
+    const rem = secs % 60;
     if (m >= 60) {
       const h = Math.floor(m / 60);
       const remM = m % 60;
@@ -88,7 +77,13 @@ export default function LeadDetailsModal({
     return `${m}m ${rem}s`;
   }
 
-  // Remove old junk from notes text ONLY (text area should stay clean)
+  function extractRecordingSidFromUrl(url) {
+    const u = s(url);
+    if (!u) return "";
+    const m = u.match(/\/Recordings\/(RE[a-zA-Z0-9]+)(?:\.json|\.mp3)?/);
+    return m?.[1] || "";
+  }
+
   function stripCallJunk(text) {
     const raw = String(text || "");
     const lines = raw.split(/\r?\n/);
@@ -97,7 +92,6 @@ export default function LeadDetailsModal({
 
     for (const line of lines) {
       const l = line.trim();
-
       if (/^Call recording ready/i.test(l)) {
         skipping = true;
         continue;
@@ -106,58 +100,26 @@ export default function LeadDetailsModal({
         if (!l) skipping = false;
         continue;
       }
-
-      if (/^\s*===\s*Call Recordings/i.test(l)) continue;
+      if (/^REC:\s*/i.test(l)) continue;
       if (/\[REC:.*\]/i.test(l)) continue;
       if (/\[RECURL:.*\]/i.test(l)) continue;
-
+      if (/^(To:|From:|CallSid:|RecordingSid:|Duration:|Status:|Recording:)/i.test(l)) continue;
       out.push(line);
     }
 
     return out.join("\n").replace(/\n{4,}/g, "\n\n\n").trimEnd();
   }
 
-  // Extract RE... from Twilio Recording URL if present
-  function extractRecordingSidFromUrl(url) {
-    const u = s(url);
-    if (!u) return "";
-    const m = u.match(/\/Recordings\/(RE[a-zA-Z0-9]+)(?:\.json)?/);
-    return m?.[1] || "";
-  }
-
-  // Parse text notes into timeline chunks by [timestamp] headers you already use
-  function parseNotesToTimeline(text) {
-    const t = String(text || "").trim();
-    if (!t) return [];
-    const lines = t.split(/\r?\n/);
-
-    const items = [];
-    let current = null;
-
-    for (const line of lines) {
-      const m = line.match(/^\s*\[([^\]]+)\]\s*$/);
-      if (m) {
-        if (current) items.push(current);
-        current = { stamp: m[1], body: "" };
-        continue;
-      }
-      if (!current) current = { stamp: "", body: "" };
-      current.body += (current.body ? "\n" : "") + line;
-    }
-    if (current) items.push(current);
-
-    // newest first if timestamps exist; otherwise keep order
-    return items.reverse().map((x, idx) => ({ ...x, key: `note:${idx}` }));
-  }
-
-  // -------------------- COLORS --------------------
+  // ---------------- UI tint ----------------
   const stageColor = stages.find((st) => st.id === lead.stage)?.color || "#3b82f6";
-  const panelTint = {
-    background: `linear-gradient(135deg, rgba(15,23,42,0.98), ${stageColor}33)`,
-  };
+  const panelTint = { background: `linear-gradient(135deg, rgba(15,23,42,0.98), ${stageColor}33)` };
 
-  // -------------------- STATE --------------------
-  const [leadNotes, setLeadNotes] = useState(stripCallJunk(lead.notes || ""));
+  // ---------------- Refs & State ----------------
+  const editorRef = useRef(null);
+
+  const [historyNotes, setHistoryNotes] = useState(() => stripCallJunk(lead.notes || ""));
+  const [editorContent, setEditorContent] = useState("");
+  const [showEditor, setShowEditor] = useState(false);
 
   const [leadTasks, setLeadTasks] = useState([]);
   const [tasksLoading, setTasksLoading] = useState(false);
@@ -167,25 +129,17 @@ export default function LeadDetailsModal({
   const [newTaskDate, setNewTaskDate] = useState("");
   const [newTaskTime, setNewTaskTime] = useState("");
 
-  // voice-to-text
   const [isRecording, setIsRecording] = useState(false);
   const recognitionRef = useRef(null);
   const recordingRef = useRef(false);
   const silenceTimeoutRef = useRef(null);
 
-  // dialer
   const [showDialer, setShowDialer] = useState(true);
 
-  // recordings
-  const [recLoading, setRecLoading] = useState(false);
-  const [recError, setRecError] = useState("");
-<<<<<<< HEAD
-  const [recordings, setRecordings] = useState([]);
-=======
-  const [mergedRecordings, setMergedRecordings] = useState([]);
->>>>>>> 524cfe9 (WIP: autoresponder + automation + sms fixes)
+  const [callLoading, setCallLoading] = useState(false);
+  const [callError, setCallError] = useState("");
+  const [calls, setCalls] = useState([]);
 
-  // calendar
   const [isCalendarOpen, setIsCalendarOpen] = useState(false);
   const [calendarMonth, setCalendarMonth] = useState(() => {
     const d = new Date();
@@ -193,17 +147,15 @@ export default function LeadDetailsModal({
     return d;
   });
 
-  // automation
   const [showAutomation, setShowAutomation] = useState(false);
 
-  // draggable + resizable
   const [modalOffset, setModalOffset] = useState({ x: 0, y: 0 });
   const DEFAULT_WIDTH = 1450;
   const DEFAULT_HEIGHT = 820;
   const [modalSize, setModalSize] = useState({ width: DEFAULT_WIDTH, height: DEFAULT_HEIGHT });
+
   const [isModalDragging, setIsModalDragging] = useState(false);
   const [isResizing, setIsResizing] = useState(false);
-
   const modalDragRef = useRef({ startX: 0, startY: 0, originX: 0, originY: 0 });
   const modalResizeRef = useRef({
     startX: 0,
@@ -212,11 +164,17 @@ export default function LeadDetailsModal({
     startHeight: DEFAULT_HEIGHT,
   });
 
-  // -------------------- EFFECTS --------------------
+  const [justAddedHeader, setJustAddedHeader] = useState(false);
+
+  // ---------------- Effects ----------------
   useEffect(() => {
     if (!isOpen || !lead || !userId) return;
 
-    setLeadNotes(stripCallJunk(lead.notes || ""));
+    const initial = stripCallJunk(lead.notes || "");
+    setHistoryNotes(initial);
+    setEditorContent("");
+    setShowEditor(false);
+    if (editorRef.current) editorRef.current.value = "";
 
     setLeadTasks([]);
     setNewTaskText("");
@@ -226,33 +184,65 @@ export default function LeadDetailsModal({
     setShowDialer(true);
     setShowAutomation(false);
 
-    setRecError("");
-    setRecordings([]);
+    setCallError("");
+    setCalls([]);
 
     setModalOffset({ x: 0, y: 0 });
     setModalSize({ width: DEFAULT_WIDTH, height: DEFAULT_HEIGHT });
 
     loadTasksForLead(lead.id);
 
-    loadAllRecordings();
-    setTimeout(() => loadAllRecordings(), 6000);
-    setTimeout(() => loadAllRecordings(), 15000);
-    setTimeout(() => loadAllRecordings(), 30000);
+    loadLeadCalls();
+    const t1 = setTimeout(() => loadLeadCalls(), 6000);
+    const t2 = setTimeout(() => loadLeadCalls(), 15000);
+    const t3 = setTimeout(() => loadLeadCalls(), 30000);
 
-    // OPTIONAL: recordings sometimes take time to appear after hangup
-    // (keeps UI exactly same, just refreshes quietly)
-    setTimeout(() => loadAllRecordings(), 6000);
-    setTimeout(() => loadAllRecordings(), 15000);
-    setTimeout(() => loadAllRecordings(), 30000);
-
+    return () => {
+      clearTimeout(t1);
+      clearTimeout(t2);
+      clearTimeout(t3);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isOpen, lead?.id, lead?.phone, userId]);
+  }, [isOpen, lead?.id, userId]);
+
+  useEffect(() => {
+    if (!isOpen || !lead?.id) return undefined;
+    const iv = setInterval(() => {
+      loadLeadCalls();
+    }, 10000);
+    return () => clearInterval(iv);
+  }, [isOpen, lead?.id]);
+
+  useEffect(() => {
+    if (!justAddedHeader) return;
+    requestAnimationFrame(() => {
+      try {
+        if (editorRef.current) {
+          const val = editorRef.current.value || "";
+          const firstNewline = val.indexOf("\n");
+          let pos = 0;
+          if (firstNewline >= 0) {
+            if (val[firstNewline + 1] === "\n") pos = firstNewline + 2;
+            else pos = firstNewline + 1;
+          } else {
+            pos = val.length;
+          }
+          editorRef.current.selectionStart = editorRef.current.selectionEnd = pos;
+          editorRef.current.focus();
+        }
+      } catch (e) {}
+      setJustAddedHeader(false);
+    });
+  }, [justAddedHeader]);
 
   useEffect(() => {
     function handleMouseMove(e) {
       if (isModalDragging) {
         const { startX, startY, originX, originY } = modalDragRef.current;
-        setModalOffset({ x: originX + (e.clientX - startX), y: originY + (e.clientY - startY) });
+        setModalOffset({
+          x: originX + (e.clientX - startX),
+          y: originY + (e.clientY - startY),
+        });
       }
       if (isResizing) {
         const { startX, startY, startWidth, startHeight } = modalResizeRef.current;
@@ -261,12 +251,10 @@ export default function LeadDetailsModal({
         setModalSize({ width: newWidth, height: newHeight });
       }
     }
-
     function handleMouseUp() {
       if (isModalDragging) setIsModalDragging(false);
       if (isResizing) setIsResizing(false);
     }
-
     window.addEventListener("mousemove", handleMouseMove);
     window.addEventListener("mouseup", handleMouseUp);
     return () => {
@@ -290,11 +278,10 @@ export default function LeadDetailsModal({
     return () => document.removeEventListener("mousedown", onDocClick);
   }, [showAutomation]);
 
-  // -------------------- TASKS --------------------
+  // ---------------- DB helpers ----------------
   async function loadTasksForLead(leadId) {
     if (!userId || !leadId) return;
     setTasksLoading(true);
-
     const { data, error } = await supabase
       .from("crm_tasks")
       .select("*")
@@ -311,261 +298,177 @@ export default function LeadDetailsModal({
     setTasksLoading(false);
   }
 
-<<<<<<< HEAD
-  // -------------------- RECORDINGS --------------------
-  function pickFirstUrl(obj) {
-    // brute-force: try many common names you’ve used across versions
-    const candidates = [
-      obj?.recordingUrl,
-      obj?.recording_url,
-      obj?.recording_url_json,
-      obj?.recordingUrlJson,
-      obj?.url,
-      obj?.media_url,
-      obj?.mediaUrl,
-      obj?.recording,
-      obj?.recordingLink,
-      obj?.recording_link,
-      obj?.recording_uri,
-      obj?.recordingUri,
-    ];
-
-    for (const c of candidates) {
-      const v = s(c);
-      if (v) return v;
-    }
-
-    // if it’s nested JSON-ish
+  // loadLeadCalls: include rows where lead_id matches OR phone matches lead.phone (AU-normalize),
+  // deduplicate results, merge API and DB sources.
+  async function loadLeadCalls() {
     try {
-      const asObj = typeof obj?.recording_url_json === "string" ? JSON.parse(obj.recording_url_json) : null;
-      const v = s(asObj?.url || asObj?.recordingUrl || asObj?.recording_url);
-      if (v) return v;
-    } catch {}
-    return "";
-  }
+      if (!lead?.id) return;
 
-=======
-  // Load recordings from crm_calls via SERVER API (service role) to avoid RLS empty results in browser
->>>>>>> 524cfe9 (WIP: autoresponder + automation + sms fixes)
-  async function loadDbRecordings() {
-    try {
-      if (!lead?.id) return [];
+      setCallLoading(true);
+      setCallError("");
 
-<<<<<<< HEAD
-=======
-      // must be logged in to call server endpoint securely
->>>>>>> 524cfe9 (WIP: autoresponder + automation + sms fixes)
-      const { data: sessionData } = await supabase.auth.getSession();
-      const token = sessionData?.session?.access_token || "";
-      if (!token) return [];
-
-      const r = await fetch(`/api/crm/lead-call-recordings?lead_id=${encodeURIComponent(lead.id)}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-
-      const j = await r.json();
-      if (!j?.ok) {
-        console.warn("lead-call-recordings not ok:", j);
-        return [];
+      let apiCalls = [];
+      try {
+        const { data: sessionData } = await supabase.auth.getSession();
+        const token = sessionData?.session?.access_token || "";
+        if (token) {
+          const r = await fetch(
+            `/api/crm/lead-call-recordings?lead_id=${encodeURIComponent(lead.id)}&limit=200`,
+            { headers: { Authorization: `Bearer ${token}` } }
+          );
+          const j = await r.json().catch(() => ({}));
+          if (j?.ok && Array.isArray(j.calls)) apiCalls = j.calls;
+          else if (j?.ok && Array.isArray(j.recordings)) apiCalls = j.recordings;
+        }
+      } catch (err) {
+        console.warn("API fetch failed:", err);
       }
 
-      const rows = Array.isArray(j?.recordings) ? j.recordings : [];
+      let dbCalls = [];
+      try {
+        const { data: byLeadId, error: e1 } = await supabase
+          .from("crm_calls")
+          .select(
+            "id, created_at, direction, from_number, to_number, recording_url, recording_sid, twilio_sid, recording_duration, duration, lead_id, caller_name"
+          )
+          .eq("lead_id", lead.id)
+          .order("created_at", { ascending: false })
+          .limit(500);
 
-<<<<<<< HEAD
-      return rows
-        .map((row) => {
-          const recUrl = pickFirstUrl(row);
-          const recSid = extractRecordingSidFromUrl(recUrl) || (s(row?.recording_sid).startsWith("RE") ? s(row.recording_sid) : "");
+        if (!e1 && Array.isArray(byLeadId)) dbCalls = byLeadId;
+      } catch (err) {
+        console.error("Supabase crm_calls (by lead_id) error:", err);
+      }
 
-          const createdAt = row?.created_at || row?.createdAt || row?.timestamp || row?.dateCreated || null;
-          const duration = row?.duration ?? row?.recording_duration ?? row?.recordingDuration ?? null;
+      try {
+        const leadPhoneNorm = normalizePhoneE164AU(lead.phone || "");
+        if (leadPhoneNorm) {
+          const { data: recent, error: e2 } = await supabase
+            .from("crm_calls")
+            .select(
+              "id, created_at, direction, from_number, to_number, recording_url, recording_sid, twilio_sid, recording_duration, duration, lead_id, caller_name"
+            )
+            .order("created_at", { ascending: false })
+            .limit(500);
 
-          const key = recSid ? `sid:${recSid}` : recUrl ? `url:${recUrl}` : `db:${Math.random().toString(16).slice(2)}`;
-=======
-      // map api rows to unified recording items
-      return (rows || [])
-        .filter((r) => r && (s(r.recordingUrl) || s(r.sid)))
-        .map((r) => {
-          const recUrl = s(r.recordingUrl || r.recording_url || r.url || "");
-          const sid = s(r.sid || r.recordingSid || r.recording_sid || "") || extractRecordingSidFromUrl(recUrl);
+          if (!e2 && Array.isArray(recent)) {
+            const norm = (num) => {
+              if (!num) return "";
+              const n = String(num).replace(/[^\d+]/g, "");
+              if (!n.startsWith("+") && n.startsWith("61")) return "+" + n;
+              if (!n.startsWith("+") && n.startsWith("0") && n.length >= 9) return "+61" + n.slice(1);
+              return n;
+            };
+            for (const r of recent) {
+              const fn = norm(r.from_number || r.from);
+              const tn = norm(r.to_number || r.to);
+              if (fn === leadPhoneNorm || tn === leadPhoneNorm) {
+                if (!dbCalls.find((c) => String(c.id) === String(r.id))) dbCalls.push(r);
+              }
+            }
+          }
+        }
+      } catch (err) {
+        console.error("Supabase crm_calls (phone match) error:", err);
+      }
 
-          const createdAt = r.createdAt || r.created_at || r.dateCreated || r.date_created || r.created || null;
-          const duration = r.duration ?? r.recordingDuration ?? r.recording_duration ?? null;
+      const normalizedDb = (dbCalls || []).map((c) => ({
+        id: c.id,
+        created_at: c.created_at,
+        direction: c.direction,
+        from_number: c.from_number || c.from || "",
+        to_number: c.to_number || c.to || "",
+        recording_url: c.recording_url || "",
+        recording_sid: c.recording_sid || c.twilio_sid || "",
+        duration: c.recording_duration || c.duration || null,
+        caller_name: c.caller_name || "",
+        raw: c,
+      }));
 
-          const key = sid ? `sid:${sid}` : recUrl ? `url:${recUrl}` : `db:${Math.random().toString(16).slice(2)}`;
->>>>>>> 524cfe9 (WIP: autoresponder + automation + sms fixes)
+      let mergedCalls = [];
+      if (apiCalls.length > 0) {
+        const byKey = {};
+        for (const d of normalizedDb) {
+          const key = d.recording_sid || d.id || (d.created_at ? new Date(d.created_at).toISOString() : "");
+          if (key) byKey[key] = d;
+        }
+        for (const a of apiCalls) {
+          const aCreated = a.created_at ? new Date(a.created_at).toISOString() : "";
+          const matchKey = a.recording_sid || a.sid || extractRecordingSidFromUrl(a.recording_url) || (a.id || "");
+          const dbMatch =
+            byKey[matchKey] ||
+            normalizedDb.find((d) => {
+              const da = d.created_at ? new Date(d.created_at).toISOString() : "";
+              return da === aCreated || String(d.id) === String(a.id);
+            });
+          if (dbMatch) {
+            mergedCalls.push({
+              ...dbMatch,
+              recording_url: a.recording_url || dbMatch.recording_url,
+              recording_sid: a.recording_sid || dbMatch.recording_sid,
+              duration: a.duration || dbMatch.duration,
+              _api: a,
+            });
+          } else {
+            mergedCalls.push({
+              id: a.id || null,
+              created_at: a.created_at || a.date_created || a.created || null,
+              direction: a.direction || a.call_direction || "",
+              from_number: a.from || a.from_number || "",
+              to_number: a.to || a.to_number || "",
+              recording_url: a.recording_url || a.url || "",
+              recording_sid: a.recording_sid || a.sid || extractRecordingSidFromUrl(a.recording_url) || "",
+              duration: a.duration || a.recording_duration || null,
+              caller_name: a.caller_name || "",
+              raw: a,
+            });
+          }
+        }
+      } else {
+        mergedCalls = normalizedDb;
+      }
 
-          return {
-            key,
-            source: "db",
-            sid: recSid || "",
-            recordingUrl: recUrl || "",
-            createdAt,
-            duration,
-          };
-        })
-        .filter((x) => x.recordingUrl || (x.sid && x.sid.startsWith("RE")));
+      const seen = new Set();
+      const deduped = [];
+      for (const c of mergedCalls) {
+        const key = c.recording_sid || c.id || (c.created_at ? new Date(c.created_at).toISOString() : "");
+        if (!key) continue;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        deduped.push(c);
+      }
+
+      const outbound = (deduped || []).sort((a, b) => {
+        const ta = a?.created_at ? new Date(a.created_at).getTime() : 0;
+        const tb = b?.created_at ? new Date(b.created_at).getTime() : 0;
+        return tb - ta;
+      });
+
+      setCalls(outbound);
+      setCallLoading(false);
     } catch (e) {
-      console.error("loadDbRecordings error:", e);
-      return [];
+      console.error("loadLeadCalls error:", e);
+      setCalls([]);
+      setCallError(e?.message || "Failed to load calls.");
+      setCallLoading(false);
     }
   }
 
-  async function loadTwilioRecordings() {
-    const rawPhone = s(lead?.phone);
-    if (!rawPhone) return [];
-
-    const phoneE164 = normalizePhoneE164AU(rawPhone);
-    const phoneToQuery = phoneE164 || rawPhone;
-
-    try {
-      const r = await fetch(`/api/twilio/list-call-recordings?phone=${encodeURIComponent(phoneToQuery)}&limit=50`);
-      const j = await r.json();
-      if (!j?.ok) throw new Error(j?.error || "Failed to load recordings from Twilio");
-
-      const recs = Array.isArray(j?.recordings) ? j.recordings : [];
-
-      return recs
-        .map((x) => {
-          const sid = s(x.sid || x.recordingSid);
-<<<<<<< HEAD
-          const createdAt = x.dateCreated || x.createdAt || x.created_at || x.timestamp || null;
-          const duration = x.duration ?? x.recordingDuration ?? null;
-          if (!sid) return null;
-=======
-
-          const createdAt =
-            x.dateCreated ||
-            x.date_created ||
-            x.createdAt ||
-            x.created_at ||
-            x.startTime ||
-            x.start_time ||
-            x.timestamp ||
-            null;
-
-          const duration = x.duration ?? x.recordingDuration ?? x.recording_duration ?? null;
-
->>>>>>> 524cfe9 (WIP: autoresponder + automation + sms fixes)
-          return {
-            key: `sid:${sid}`,
-            source: "twilio",
-            sid,
-            recordingUrl: "",
-            createdAt,
-            duration,
-          };
-        })
-        .filter(Boolean);
-    } catch (e) {
-      console.error("loadTwilioRecordings error:", e);
-      return [];
-    }
-  }
-
-  function getAudioSrc(item) {
-    const sid = s(item?.sid);
-    const url = s(item?.recordingUrl);
+  function getAudioSrc(call) {
+    const sid = s(call?.recording_sid) || s(call?.twilio_sid) || extractRecordingSidFromUrl(call?.recording_url);
+    const url = s(call?.recording_url || call?.recordingUrl || "");
+    if (url.startsWith("/api/twilio/recording?sid=")) return url;
+    if (url.startsWith("/api/twilio/recording-audio?url=")) return url;
     if (sid && sid.startsWith("RE")) return `/api/twilio/recording?sid=${encodeURIComponent(sid)}`;
     if (url) return `/api/twilio/recording-audio?url=${encodeURIComponent(url)}`;
     return "";
   }
 
-  async function loadAllRecordings() {
-    setRecLoading(true);
-    setRecError("");
-    setRecordings([]);
-
-    try {
-<<<<<<< HEAD
-      const [dbList, twList] = await Promise.all([loadDbRecordings(), loadTwilioRecordings()]);
-      const map = new Map();
-
-      // Prefer DB (it has URLs)
-=======
-      const [dbList, twList] = await Promise.all([loadDbRecordings(), loadTwilioRecordings().catch(() => [])]);
-
-      const map = new Map();
-
->>>>>>> 524cfe9 (WIP: autoresponder + automation + sms fixes)
-      for (const item of dbList) {
-        const k = item.sid ? `sid:${item.sid}` : item.recordingUrl ? `url:${item.recordingUrl}` : item.key;
-        map.set(k, item);
-      }
-
-      // Add Twilio if missing
-      for (const item of twList) {
-        const k = item.sid ? `sid:${item.sid}` : item.key;
-        if (!map.has(k)) map.set(k, item);
-      }
-
-      const merged = Array.from(map.values());
-      merged.sort((a, b) => {
-        const ta = a?.createdAt ? new Date(a.createdAt).getTime() : 0;
-        const tb = b?.createdAt ? new Date(b.createdAt).getTime() : 0;
-        return tb - ta;
-      });
-
-      setRecordings(merged);
-    } catch (e) {
-      setRecError(e?.message || "Unable to load recordings.");
-      setRecordings([]);
-    } finally {
-      setRecLoading(false);
-    }
-  }
-
-  // -------------------- NOTES SAVE --------------------
-  async function handleSaveLeadNotes() {
-    if (!lead) return;
-    const clean = stripCallJunk(leadNotes);
-
-    try {
-      const { error } = await supabase.from("leads").update({ notes: clean, updated_at: new Date() }).eq("id", lead.id);
-<<<<<<< HEAD
-=======
-
->>>>>>> 524cfe9 (WIP: autoresponder + automation + sms fixes)
-      if (error) {
-        console.error("Save notes error:", error);
-        alert("There was an error saving notes.");
-        return;
-      }
-      if (onNotesUpdated) onNotesUpdated(lead.id, clean);
-      alert("Notes saved.");
-      handleCloseInternal();
-    } catch (err) {
-      console.error("Save notes error:", err);
-      alert("There was an error saving notes.");
-    }
-  }
-
-  // -------------------- VOICE TO TEXT --------------------
-  function addTimestampHeader() {
-    const now = new Date();
-    const stamp = now.toLocaleString("en-AU", {
-      timeZone: "Australia/Brisbane",
-      weekday: "short",
-      day: "2-digit",
-      month: "short",
-      year: "numeric",
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-    });
-
-    setLeadNotes((prev) => {
-      const header = `[${stamp}]`;
-      if (!prev || !prev.trim()) return `${header}\n`;
-      return `${prev.trim()}\n\n${header}\n`;
-    });
-  }
-
+  // ---------------- Voice-to-text ----------------
   function resetSilenceTimer() {
     if (silenceTimeoutRef.current) clearTimeout(silenceTimeoutRef.current);
     if (recordingRef.current) silenceTimeoutRef.current = setTimeout(() => stopRecording(), 20000);
   }
-
   function clearSilenceTimer() {
     if (silenceTimeoutRef.current) {
       clearTimeout(silenceTimeoutRef.current);
@@ -607,23 +510,49 @@ export default function LeadDetailsModal({
         text = text.replace(/\bexclamation mark\b/gi, "!");
         text = text.replace(/\bcolon\b/gi, ":");
 
-        setLeadNotes((prevRaw) => {
+        setEditorContent((prevRaw) => {
           const prev = prevRaw || "";
-          if (!prev) return text;
-          const lastChar = prev.slice(-1);
-          const firstChar = text[0];
-<<<<<<< HEAD
-          const needsSpace = ![" ", "\n"].includes(lastChar) && !["\n", ".", ",", "!", "?", ":"].includes(firstChar);
-=======
+          let startPos = prev.length;
+          try {
+            if (editorRef.current && typeof editorRef.current.selectionStart === "number") {
+              startPos = editorRef.current.selectionStart;
+            }
+          } catch (e) {
+            startPos = prev.length;
+          }
 
-          const needsSpace = ![" ", "\n"].includes(lastChar) && !["\n", ".", ",", "!", "?", ":"].includes(firstChar);
+          const before = prev.slice(0, startPos);
+          const after = prev.slice(startPos);
 
->>>>>>> 524cfe9 (WIP: autoresponder + automation + sms fixes)
-          return prev + (needsSpace ? " " : "") + text;
+          const needsSpace =
+            before &&
+            ![" ", "\n"].includes(before.slice(-1)) &&
+            !["\n", ".", ",", "!", "?", ":"].includes(text[0]);
+
+          const insert = (needsSpace ? " " : "") + text;
+          const newVal = before + insert + after;
+
+          setTimeout(() => {
+            try {
+              if (editorRef.current) {
+                editorRef.current.value = newVal;
+                const newPos = startPos + insert.length;
+                editorRef.current.selectionStart = editorRef.current.selectionEnd = newPos;
+                editorRef.current.focus();
+              }
+            } catch (e) {}
+          }, 0);
+
+          return newVal;
         });
       };
 
-      recognition.onerror = (event) => console.error("Speech recognition error:", event);
+      recognition.onerror = (event) => {
+        console.error("Speech recognition error:", event);
+        if (event.error === "not-allowed" || event.error === "service-not-allowed") {
+          alert("Microphone access denied. Please allow microphone permission and try again.");
+        }
+      };
 
       recognition.onend = () => {
         clearSilenceTimer();
@@ -647,14 +576,49 @@ export default function LeadDetailsModal({
     return recognitionRef.current;
   }
 
+  function addTimestampHeader() {
+    const now = new Date();
+    const stamp = now.toLocaleString("en-AU", {
+      timeZone: "Australia/Brisbane",
+      weekday: "short",
+      day: "2-digit",
+      month: "short",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    });
+    const header = `[${stamp}]`;
+
+    if (!showEditor) setShowEditor(true);
+
+    setEditorContent((prev) => {
+      const v = String(prev || "");
+      if (!v.trim()) {
+        setJustAddedHeader(true);
+        return `${header}\n`;
+      }
+      setJustAddedHeader(true);
+      return `${header}\n\n${v}`;
+    });
+  }
+
   function startRecording() {
     const recognition = initRecognition();
     if (!recognition) return;
     if (recordingRef.current) return;
 
+    if (!showEditor) setShowEditor(true);
+    if (!editorContent || !/^\[.*\]/.test((editorContent || "").trim().split("\n")[0] || "")) {
+      addTimestampHeader();
+    } else {
+      setTimeout(() => {
+        try { if (editorRef.current) editorRef.current.focus(); } catch (e) {}
+      }, 0);
+    }
+
     recordingRef.current = true;
     setIsRecording(true);
-    addTimestampHeader();
 
     try {
       recognition.start();
@@ -677,9 +641,96 @@ export default function LeadDetailsModal({
     } catch (e) {
       console.error("Speech stop error:", e);
     }
+
+    setTimeout(() => loadLeadCalls(), 1500);
+    setTimeout(() => loadLeadCalls(), 5000);
+    setTimeout(() => loadLeadCalls(), 12000);
   }
 
-  // -------------------- TASK HELPERS --------------------
+  // ---------------- Notes parsing for timeline ----------------
+  function parseNotesIntoEntries(notesText) {
+    const raw = String(notesText || "").replace(/\r/g, "");
+    if (!raw) return [];
+
+    const lines = raw.split("\n");
+    const entries = [];
+    let current = { header: null, created_at: null, lines: [] };
+
+    const tryParseDateFromHeader = (hdr) => {
+      const inner = hdr.replace(/^\[|\]$/g, "").trim();
+      const d = new Date(inner);
+      if (!Number.isNaN(d.getTime())) return d.toISOString();
+      return null;
+    };
+
+    for (const rawLine of lines) {
+      const line = rawLine.trimEnd();
+      if (/^\[.*\]$/.test(line)) {
+        if (current.header || current.lines.length > 0) {
+          entries.push({
+            type: "note",
+            header: current.header,
+            created_at: current.created_at,
+            text: current.lines.join("\n").trim(),
+          });
+        }
+        const created = tryParseDateFromHeader(line);
+        current = { header: line, created_at: created, lines: [] };
+      } else {
+        current.lines.push(line);
+      }
+    }
+    if (current.header || current.lines.length > 0) {
+      entries.push({
+        type: "note",
+        header: current.header,
+        created_at: current.created_at,
+        text: current.lines.join("\n").trim(),
+      });
+    }
+
+    if (entries.length === 0 && raw) {
+      entries.push({
+        type: "note",
+        header: null,
+        created_at: null,
+        text: raw.trim(),
+      });
+    }
+
+    return entries;
+  }
+
+  const timeline = useMemo(() => {
+    try {
+      const noteEntries = parseNotesIntoEntries(historyNotes || "").map((n, i) => ({
+        kind: "note",
+        id: `note-${i}-${n.created_at || ""}`,
+        created_at: n.created_at ? new Date(n.created_at).toISOString() : null,
+        header: n.header,
+        text: n.text,
+      }));
+
+      const callsNormalized = (calls || []).map((c, i) => ({
+        kind: "call",
+        id: `call-${c.id || i}-${c.created_at || ""}`,
+        created_at: c?.created_at ? new Date(c.created_at).toISOString() : null,
+        call: c,
+      }));
+
+      const merged = [...noteEntries, ...callsNormalized].sort((a, b) => {
+        const ta = a.created_at ? new Date(a.created_at).getTime() : -1;
+        const tb = b.created_at ? new Date(b.created_at).getTime() : -1;
+        return tb - ta;
+      });
+
+      return merged;
+    } catch (e) {
+      return [];
+    }
+  }, [historyNotes, calls]);
+
+  // ---------------- Tasks & saving ----------------
   function getTaskTypeLabel(type) {
     switch (type) {
       case "phone_call":
@@ -698,14 +749,22 @@ export default function LeadDetailsModal({
   }
 
   async function handleAddUpcomingTask() {
-    if (!userId || !lead) return alert("No lead or user loaded.");
-
-    const text = newTaskText.trim();
-    if (!text) return alert("Please add what the task is about.");
-    if (!newTaskDate) return alert("Please choose a date from the calendar.");
+    if (!userId || !lead) {
+      alert("No lead or user loaded.");
+      return;
+    }
+    const text = (newTaskText || "").trim();
+    if (!text) {
+      alert("Please add what the task is about.");
+      return;
+    }
+    if (!newTaskDate) {
+      alert("Please choose a date from the calendar.");
+      return;
+    }
 
     const timeString = newTaskTime || "09:00";
-    const whenText = new Date(`${newTaskDate}T${timeString}:00`).toLocaleString("en-AU", {
+    const whenText = new Date(`${newTaskDate}T${timeString}:00`).toLocaleDateString("en-AU", {
       timeZone: "Australia/Brisbane",
       weekday: "short",
       day: "2-digit",
@@ -729,9 +788,11 @@ export default function LeadDetailsModal({
     };
 
     const { data, error } = await supabase.from("crm_tasks").insert(payload).select().single();
+
     if (error) {
       console.error("Add upcoming task error:", error);
-      return alert("There was an error saving the task / reminder.");
+      alert("There was an error saving the task / reminder.");
+      return;
     }
 
     setLeadTasks((prev) => [data, ...prev]);
@@ -739,57 +800,50 @@ export default function LeadDetailsModal({
     setNewTaskDate("");
     setNewTaskTime("");
     setIsCalendarOpen(false);
+
     alert("Upcoming task added.");
   }
 
-  // -------------------- CALENDAR --------------------
-  const calendarYear = calendarMonth.getFullYear();
-  const calendarMonthIndex = calendarMonth.getMonth();
-  const firstOfMonth = new Date(calendarYear, calendarMonthIndex, 1);
-  const startWeekday = firstOfMonth.getDay();
-  const daysInMonth = new Date(calendarYear, calendarMonthIndex + 1, 0).getDate();
+  async function handleSaveLeadNotes() {
+    if (!lead) return;
 
-  const calendarCells = [];
-  for (let i = 0; i < startWeekday; i++) calendarCells.push(null);
-  for (let d = 1; d <= daysInMonth; d++) calendarCells.push(d);
+    const draft = String(editorContent || "").trim();
+    if (!draft) {
+      alert("Please write a note before saving.");
+      return;
+    }
 
-  function toISODate(day) {
-    const dt = new Date(calendarYear, calendarMonthIndex, day);
-    return dt.toISOString().slice(0, 10);
+    const combined = `${draft}\n\n${historyNotes || ""}`;
+    const clean = stripCallJunk(combined);
+
+    try {
+      const { error } = await supabase
+        .from("leads")
+        .update({ notes: clean, updated_at: new Date() })
+        .eq("id", lead.id);
+
+      if (error) {
+        console.error("Save notes error:", error);
+        alert("There was an error saving notes.");
+        return;
+      }
+
+      setHistoryNotes(clean);
+      setEditorContent("");
+      setShowEditor(false);
+
+      setTimeout(() => loadLeadCalls(), 1500);
+      setTimeout(() => loadLeadCalls(), 5000);
+
+      if (onNotesUpdated) onNotesUpdated(lead.id, clean);
+      alert("Notes saved.");
+      handleCloseInternal();
+    } catch (err) {
+      console.error("Save notes error:", err);
+      alert("There was an error saving notes.");
+    }
   }
 
-  function goMonth(offset) {
-    setCalendarMonth((prev) => new Date(prev.getFullYear(), prev.getMonth() + offset, 1));
-  }
-
-  const todayStr = new Date().toISOString().slice(0, 10);
-  const calendarLabel = calendarMonth.toLocaleString("en-AU", { month: "long", year: "numeric" });
-
-  // -------------------- DRAG / RESIZE --------------------
-  function handleModalHeaderMouseDown(e) {
-    e.preventDefault();
-    modalDragRef.current = {
-      startX: e.clientX,
-      startY: e.clientY,
-      originX: modalOffset.x,
-      originY: modalOffset.y,
-    };
-    setIsModalDragging(true);
-  }
-
-  function handleResizeMouseDown(e) {
-    e.preventDefault();
-    e.stopPropagation();
-    modalResizeRef.current = {
-      startX: e.clientX,
-      startY: e.clientY,
-      startWidth: modalSize.width,
-      startHeight: modalSize.height,
-    };
-    setIsResizing(true);
-  }
-
-  // -------------------- ACTIONS --------------------
   function handleCloseInternal() {
     stopRecording();
     setIsCalendarOpen(false);
@@ -798,24 +852,26 @@ export default function LeadDetailsModal({
     if (onClose) onClose();
   }
 
-  function goToSmsPage() {
-    const base = "/modules/email/crm/sms-marketing";
-    const qs = lead?.id ? `?lead_id=${encodeURIComponent(lead.id)}` : "";
-    router.push(base + qs);
+  // ---------------- Calendar helpers ----------------
+  const calendarYear = calendarMonth.getFullYear();
+  const calendarMonthIndex = calendarMonth.getMonth();
+  const firstOfMonth = new Date(calendarYear, calendarMonthIndex, 1);
+  const startWeekday = firstOfMonth.getDay();
+  const daysInMonth = new Date(calendarYear, calendarMonthIndex + 1, 0).getDate();
+  const calendarCells = [];
+  for (let i = 0; i < startWeekday; i++) calendarCells.push(null);
+  for (let d = 1; d <= daysInMonth; d++) calendarCells.push(d);
+  function toISODate(day) {
+    const dt = new Date(calendarYear, calendarMonthIndex, day);
+    return dt.toISOString().slice(0, 10);
   }
+  function goMonth(offset) {
+    setCalendarMonth((prev) => new Date(prev.getFullYear(), prev.getMonth() + offset, 1));
+  }
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const calendarLabel = calendarMonth.toLocaleDateString("en-AU", { month: "long", year: "numeric" });
 
-  // Dialer number
-  const leadPhone = s(lead.phone);
-  const dialToNumber = useMemo(() => {
-    const e164 = normalizePhoneE164AU(leadPhone);
-    return e164 || leadPhone;
-  }, [leadPhone]);
-
-  const leadEmail = s(lead.email);
-
-  // Timeline data
-  const noteItems = useMemo(() => parseNotesToTimeline(leadNotes), [leadNotes]);
-
+  // ---------------- Render ----------------
   return (
     <div style={styles.modalOverlay}>
       <div
@@ -831,20 +887,23 @@ export default function LeadDetailsModal({
           fontSize: scaled(16),
         }}
       >
-        <div style={{ ...styles.leadModalHeader, background: stageColor }} onMouseDown={handleModalHeaderMouseDown}>
+        <div style={{ ...styles.leadModalHeader, background: stageColor }} onMouseDown={(e) => {
+          e.preventDefault();
+          modalDragRef.current = { startX: e.clientX, startY: e.clientY, originX: modalOffset.x, originY: modalOffset.y };
+          setIsModalDragging(true);
+        }}>
           <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
             <h2 style={{ margin: 0, fontSize: scaled(18) }}>Lead Details – {lead.name || "Unnamed"}</h2>
             <div style={{ fontSize: scaled(12), opacity: 0.92 }}>
-              {leadEmail ? `✉ ${leadEmail}` : ""} {leadEmail && leadPhone ? "  •  " : ""} {leadPhone ? `📞 ${leadPhone}` : ""}
+              {lead.email ? `✉ ${lead.email}` : ""}{lead.email && lead.phone ? " • " : ""}{lead.phone ? `📞 ${lead.phone}` : ""}
             </div>
           </div>
           <span style={{ fontSize: scaled(11), opacity: 0.9 }}>drag this bar to move</span>
         </div>
 
         <div style={styles.leadModalColumns}>
-          {/* LEFT */}
-          <div style={styles.leadModalLeft}>
-            <div style={{ ...styles.detailsBox, ...panelTint }}>
+          <div style={{ ...styles.leadModalLeft, overflowY: "auto" }}>
+            <div style={{ ...styles.detailsBox, ...panelTint, overflowY: "auto" }}>
               <LeadInfoCard lead={lead} stageColor={stageColor} fontScale={fontScale * 0.8} />
             </div>
 
@@ -854,18 +913,20 @@ export default function LeadDetailsModal({
               </div>
 
               <div style={styles.callsPhoneRow}>
-                <span style={styles.callsPhoneText}>{leadPhone || "No phone on file"}</span>
-                {!!leadPhone && (
+                <span style={styles.callsPhoneText}>{lead.phone || "No phone on file"}</span>
+                {!!lead.phone && (
                   <button type="button" onClick={() => setShowDialer((p) => !p)} style={styles.smallToggleBtn} title="Show/Hide dialer">
                     {showDialer ? "Hide dialer" : "Show dialer"}
                   </button>
                 )}
               </div>
 
-              {showDialer && leadPhone && <BrowserDialer toNumber={dialToNumber} displayName={lead.name || ""} userId={userId} />}
+              {showDialer && lead.phone && (
+                <BrowserDialer toNumber={normalizePhoneE164AU(lead.phone)} displayName={lead.name || ""} userId={userId} />
+              )}
 
               <div style={styles.smsNavRow}>
-                <button type="button" onClick={goToSmsPage} style={styles.smsNavBtn}>
+                <button type="button" onClick={() => router.push("/modules/email/crm/sms-marketing")} style={styles.smsNavBtn}>
                   Send SMS →
                 </button>
                 <span style={styles.smsNavHelp}>Opens SMS Marketing page (no clutter here)</span>
@@ -874,18 +935,20 @@ export default function LeadDetailsModal({
 
             <div style={{ ...styles.tasksSection, ...panelTint }}>
               <div style={styles.tasksHeaderRow}>
-                <span style={{ ...styles.tasksTitle, fontSize: scaled(14) }}>📌 Tasks &amp; reminders</span>
-                {tasksLoading && <span style={{ ...styles.tasksLoading, fontSize: scaled(11) }}>Loading…</span>}
+                <span style={{ ...styles.tasksTitle, fontSize: scaled(16) }}>📌 Tasks &amp; reminders</span>
+                {tasksLoading && <span style={{ ...styles.tasksLoading, fontSize: scaled(16) }}>Loading…</span>}
               </div>
 
               <div style={styles.taskList}>
-                {leadTasks.length === 0 && !tasksLoading && <p style={{ ...styles.taskEmptyText, fontSize: scaled(12) }}>No tasks yet.</p>}
+                {leadTasks.length === 0 && !tasksLoading && (
+                  <p style={{ ...styles.taskEmptyText, fontSize: scaled(12) }}>No tasks yet.</p>
+                )}
 
                 {leadTasks.map((task) => (
                   <div key={task.id} style={styles.taskItem}>
                     <div style={styles.taskItemMain}>
                       <span style={{ ...styles.taskStatusDot, backgroundColor: task.completed ? "#22c55e" : "#f97316" }} />
-                      <span style={{ ...styles.taskItemTitle, fontSize: scaled(13) }}>{task.title}</span>
+                      <span style={{ ...styles.taskItemTitle, fontSize: scaled(16) }}>{task.title}</span>
                     </div>
                     <div style={styles.taskItemMeta}>
                       {task.due_date && (
@@ -901,15 +964,24 @@ export default function LeadDetailsModal({
             </div>
           </div>
 
-          {/* RIGHT */}
-          <div style={styles.leadModalRight}>
-            <div style={{ ...styles.notesBox, ...panelTint }}>
-              <label style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+          <div style={{ ...styles.leadModalRight }}>
+            <div style={{ ...styles.notesBox, ...panelTint, display: "flex", flexDirection: "column", height: "100%" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, flexShrink: 0 }}>
                 <span style={{ fontWeight: 600, fontSize: scaled(15) }}>Notes</span>
-                <div style={{ display: "flex", gap: 8 }}>
+
+                <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                  {callLoading ? <span style={{ fontSize: scaled(12), color: "#cbd5e1", opacity: 0.9 }}>Loading…</span> : null}
+
                   <button
                     type="button"
-                    onClick={addTimestampHeader}
+                    onClick={() => {
+                      if (!showEditor) {
+                        setShowEditor(true);
+                        setTimeout(addTimestampHeader, 0);
+                      } else {
+                        setShowEditor(false);
+                      }
+                    }}
                     style={{
                       ...styles.pillBtn,
                       background: "#0f172a",
@@ -917,77 +989,113 @@ export default function LeadDetailsModal({
                       border: "1px solid rgba(255,255,255,0.35)",
                     }}
                   >
-                    + New note
+                    {showEditor ? "Hide note" : "+ New note"}
                   </button>
 
                   <button
                     type="button"
-                    onClick={isRecording ? stopRecording : startRecording}
+                    onClick={() => {
+                      if (!showEditor) setShowEditor(true);
+                      startRecording();
+                    }}
                     style={{
                       ...styles.pillBtn,
                       background: isRecording ? "#b91c1c" : stageColor,
                       fontSize: scaled(12),
                     }}
                   >
-                    {isRecording ? "⏹ Stop Recording" : "🎙 Voice to Text"}
+                    {isRecording ? "⏹ Stop" : "🎙 Voice"}
+                  </button>
+
+                  <button type="button" onClick={() => loadLeadCalls()} style={styles.recordingsRefreshBtn}>
+                    🔄
                   </button>
                 </div>
-              </label>
-
-              {/* ✅ NOTES TIMELINE (RECORDINGS + NOTES) */}
-              <div style={styles.timelineBox}>
-                {recError ? <div style={styles.timelineError}>{recError}</div> : null}
-
-                {/* Recordings section INSIDE timeline */}
-                <div style={styles.timelineSectionHeader}>Call recordings</div>
-                {(!recordings || recordings.length === 0) && !recLoading ? (
-                  <div style={styles.timelineEmpty}>No call recordings for this lead.</div>
-                ) : null}
-
-                {(recordings || []).slice(0, 20).map((r) => {
-                  const src = getAudioSrc(r);
-                  if (!src) return null;
-                  return (
-                    <div key={r.key} style={styles.timelineItem}>
-                      <div style={styles.timelineMetaRow}>
-                        <span style={styles.timelineStamp}>{r.createdAt ? fmtDateTime(r.createdAt) : ""}</span>
-                        <span style={styles.timelineStamp}>{r.duration != null ? fmtDuration(r.duration) : ""}</span>
-                      </div>
-                      <audio controls preload="metadata" style={styles.timelineAudio} src={src} />
-                    </div>
-                  );
-                })}
-
-                {/* Notes section INSIDE timeline */}
-                <div style={{ ...styles.timelineSectionHeader, marginTop: 12 }}>Notes</div>
-                {noteItems.length === 0 ? <div style={styles.timelineEmpty}>No notes yet.</div> : null}
-
-                {noteItems.map((n) => (
-                  <div key={n.key} style={styles.timelineItem}>
-                    <div style={styles.timelineMetaRow}>
-                      <span style={styles.timelineStamp}>{n.stamp || ""}</span>
-                      <span />
-                    </div>
-                    <div style={styles.timelineNoteBody}>{n.body || ""}</div>
-                  </div>
-                ))}
               </div>
 
-              {/* TEXTAREA (text only) */}
-              <textarea
-                rows={6}
-                style={{ ...styles.notesTextarea, fontSize: scaled(16) }}
-                value={leadNotes}
-                onChange={(e) => setLeadNotes(e.target.value)}
-                placeholder="Type or use voice-to-text to record call notes..."
-              />
+              {showEditor && (
+                <div style={{ marginBottom: 10 }}>
+                  <textarea
+                    ref={editorRef}
+                    rows={4}
+                    value={editorContent}
+                    onChange={(e) => setEditorContent(e.target.value)}
+                    placeholder="Type a new note here..."
+                    style={{ ...styles.notesTextarea, fontSize: scaled(14), marginBottom: 10 }}
+                    onMouseDown={(e) => e.stopPropagation()}
+                  />
+                  <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+                    <button type="button" onClick={() => { setEditorContent(""); setShowEditor(false); }} style={styles.backBtn2}>
+                      Cancel
+                    </button>
+                    <button type="button" onClick={handleSaveLeadNotes} style={styles.saveBtn}>
+                      Save Note
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              <div style={styles.entriesList}>
+                {timeline.length === 0 && !callLoading ? <div style={styles.recordingsEmpty}>No activity yet.</div> : null}
+
+                {timeline.map((entry, idx) => {
+                  if (entry.kind === "note") {
+                    const headerText = entry.header || "";
+                    const bodyText = entry.text || "";
+                    return (
+                      <div key={entry.id || `note-${idx}`} style={styles.timelineRow}>
+                        <div style={{ color: "#93c5fd", fontWeight: 700, marginRight: 8, whiteSpace: "nowrap" }}>
+                          {headerText}
+                        </div>
+                        <div style={{ color: "#e5e7eb", whiteSpace: "pre-wrap", flex: 1 }}>{bodyText}</div>
+                      </div>
+                    );
+                  }
+
+                  if (entry.kind === "call") {
+                    const c = entry.call;
+                    const when = c?.created_at ? fmtDateTime(c.created_at) : "";
+                    const dir = String(c?.direction || "").toUpperCase();
+                    const fromN = s(c?.from_number || c?.from || "");
+                    const toN = s(c?.to_number || c?.to || "");
+                    const dur = c?.duration != null ? fmtDuration(c.duration) : "";
+                    const audioSrc = getAudioSrc(c);
+
+                    return (
+                      <div key={entry.id || `call-${idx}`} style={styles.timelineRow}>
+                        <div style={{ color: "#93c5fd", fontWeight: 700, marginRight: 8, whiteSpace: "nowrap" }}>
+                          [{when}]
+                        </div>
+
+                        <div style={{ color: "#e5e7eb", display: "flex", alignItems: "center", gap: 10, flex: 1 }}>
+                          <div style={{ minWidth: 180, fontWeight: 700 }}>{dir} {fromN} → {toN} {dur ? `(${dur})` : ""}</div>
+                          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                            <div style={{ color: "#cbd5e1", fontWeight: 700 }}>🎧 Voice</div>
+                            {audioSrc ? (
+                              <audio controls preload="none" src={audioSrc} style={{ height: 28, width: 180 }} />
+                            ) : (
+                              <div style={{ color: "#94a3b8" }}>No audio</div>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  }
+
+                  return null;
+                })}
+              </div>
             </div>
 
             <div style={{ ...styles.addTaskSection, ...panelTint }}>
-              <h3 style={{ margin: "0 0 8px", fontSize: scaled(15) }}>📌 Add upcoming task</h3>
+              <h3 style={{ margin: "0 0 8px", fontSize: scaled(16) }}>📌 Add upcoming task</h3>
 
               <div style={styles.addTaskRowTop}>
-                <select value={newTaskType} onChange={(e) => setNewTaskType(e.target.value)} style={{ ...styles.taskTypeSelect, fontSize: scaled(12) }}>
+                <select
+                  value={newTaskType}
+                  onChange={(e) => setNewTaskType(e.target.value)}
+                  style={{ ...styles.taskTypeSelect, fontSize: scaled(12) }}
+                >
                   <option value="phone_call">Phone call</option>
                   <option value="text_message">Text message</option>
                   <option value="zoom_call">Zoom call</option>
@@ -1000,34 +1108,32 @@ export default function LeadDetailsModal({
                   type="text"
                   value={newTaskText}
                   onChange={(e) => setNewTaskText(e.target.value)}
-                  style={{ ...styles.addTaskTextInput, fontSize: scaled(12) }}
+                  style={{ ...styles.addTaskTextInput, fontSize: scaled(16) }}
                   placeholder="e.g. Call Grant about new car"
                 />
               </div>
 
               <div style={styles.addTaskRowBottom}>
                 <div style={styles.calendarPicker}>
-                  <button type="button" onClick={() => setIsCalendarOpen((prev) => !prev)} style={{ ...styles.calendarTrigger, fontSize: scaled(12) }}>
+                  <button
+                    type="button"
+                    onClick={() => setIsCalendarOpen((prev) => !prev)}
+                    style={{ ...styles.calendarTrigger, fontSize: scaled(16) }}
+                  >
                     {newTaskDate ? new Date(newTaskDate).toLocaleDateString("en-AU") : "Select date"}
                   </button>
 
                   {isCalendarOpen && (
                     <div style={styles.calendarPopover}>
                       <div style={styles.calendarHeader}>
-                        <button type="button" onClick={() => goMonth(-1)} style={styles.calendarNavBtn}>
-                          ◀
-                        </button>
+                        <button type="button" onClick={() => goMonth(-1)} style={styles.calendarNavBtn}>◀</button>
                         <span style={styles.calendarHeaderLabel}>{calendarLabel}</span>
-                        <button type="button" onClick={() => goMonth(1)} style={styles.calendarNavBtn}>
-                          ▶
-                        </button>
+                        <button type="button" onClick={() => goMonth(1)} style={styles.calendarNavBtn}>▶</button>
                       </div>
 
                       <div style={styles.calendarWeekdays}>
                         {["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"].map((d) => (
-                          <span key={d} style={styles.calendarWeekday}>
-                            {d}
-                          </span>
+                          <span key={d} style={styles.calendarWeekday}>{d}</span>
                         ))}
                       </div>
 
@@ -1037,15 +1143,11 @@ export default function LeadDetailsModal({
                           const iso = toISODate(day);
                           const isToday = iso === todayStr;
                           const isSelected = iso === newTaskDate;
-
                           return (
                             <button
                               type="button"
                               key={idx}
-                              onClick={() => {
-                                setNewTaskDate(iso);
-                                setIsCalendarOpen(false);
-                              }}
+                              onClick={() => { setNewTaskDate(iso); setIsCalendarOpen(false); }}
                               style={{
                                 ...styles.calendarDayBtn,
                                 ...(isSelected ? styles.calendarDaySelected : {}),
@@ -1061,9 +1163,9 @@ export default function LeadDetailsModal({
                   )}
                 </div>
 
-                <input type="time" value={newTaskTime} onChange={(e) => setNewTaskTime(e.target.value)} style={{ ...styles.addTaskTimeInput, fontSize: scaled(12) }} />
+                <input type="time" value={newTaskTime} onChange={(e) => setNewTaskTime(e.target.value)} style={{ ...styles.addTaskTimeInput, fontSize: scaled(16) }} />
 
-                <button type="button" onClick={handleAddUpcomingTask} style={{ ...styles.addTaskBtn, fontSize: scaled(12) }}>
+                <button type="button" onClick={handleAddUpcomingTask} style={{ ...styles.addTaskBtn, fontSize: scaled(16) }}>
                   + Save task
                 </button>
               </div>
@@ -1096,12 +1198,8 @@ export default function LeadDetailsModal({
           </div>
 
           <div style={{ display: "flex", gap: 10 }}>
-            <button onClick={handleCloseInternal} style={{ ...styles.backBtn2, fontSize: scaled(12) }} disabled={isRecording}>
-              Close
-            </button>
-            <button onClick={handleSaveLeadNotes} style={{ ...styles.saveBtn, fontSize: scaled(12) }}>
-              Save Notes
-            </button>
+            <button onClick={handleCloseInternal} style={{ ...styles.backBtn2, fontSize: scaled(16) }} disabled={isRecording}>Close</button>
+            <button onClick={handleSaveLeadNotes} style={{ ...styles.saveBtn, fontSize: scaled(16) }}>Save Notes</button>
           </div>
         </div>
 
@@ -1109,9 +1207,7 @@ export default function LeadDetailsModal({
           <div id="gr8-automation-popover" style={styles.automationPopover}>
             <div style={styles.automationPopoverHeader}>
               <div style={{ fontWeight: 800, fontSize: 12, color: "#e5e7eb" }}>Send to Automation</div>
-              <button type="button" onClick={() => setShowAutomation(false)} style={styles.automationPopoverX} title="Close">
-                ×
-              </button>
+              <button type="button" onClick={() => setShowAutomation(false)} style={styles.automationPopoverX} title="Close">×</button>
             </div>
             <div style={styles.automationPopoverBody}>
               <SendToAutomationPanel leadId={lead?.id} onSent={() => setShowAutomation(false)} />
@@ -1119,12 +1215,18 @@ export default function LeadDetailsModal({
           </div>
         )}
 
-        <div style={styles.resizeHandle} onMouseDown={handleResizeMouseDown} title="Drag to resize" />
+        <div style={styles.resizeHandle} onMouseDown={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          modalResizeRef.current = { startX: e.clientX, startY: e.clientY, startWidth: modalSize.width, startHeight: modalSize.height };
+          setIsResizing(true);
+        }} title="Drag to resize" />
       </div>
     </div>
   );
 }
 
+/* ---------------- Styles ---------------- */
 const styles = {
   modalOverlay: {
     position: "fixed",
@@ -1135,7 +1237,6 @@ const styles = {
     justifyContent: "center",
     zIndex: 1000,
   },
-
   leadModal: {
     background: "#020617",
     borderRadius: "14px",
@@ -1145,7 +1246,6 @@ const styles = {
     display: "flex",
     flexDirection: "column",
   },
-
   leadModalHeader: {
     padding: "10px 16px",
     borderTopLeftRadius: "14px",
@@ -1155,7 +1255,6 @@ const styles = {
     alignItems: "center",
     cursor: "grab",
   },
-
   leadModalColumns: {
     display: "grid",
     gridTemplateColumns: "1fr 2fr",
@@ -1164,7 +1263,6 @@ const styles = {
     flex: 1,
     minHeight: 0,
   },
-
   leadModalLeft: {
     borderRight: "1px solid #1f2937",
     paddingRight: "12px",
@@ -1173,7 +1271,6 @@ const styles = {
     minHeight: 0,
     gap: 10,
   },
-
   leadModalRight: {
     paddingLeft: "4px",
     display: "flex",
@@ -1182,7 +1279,6 @@ const styles = {
     height: "100%",
     minHeight: 0,
   },
-
   detailsBox: {
     padding: 0,
     borderRadius: 12,
@@ -1190,23 +1286,19 @@ const styles = {
     border: "1px solid rgba(148,163,184,0.4)",
     background: "rgba(15,23,42,0.95)",
   },
-
   callsSection: {
     padding: "10px 10px 10px",
     borderRadius: 12,
     background: "rgba(15,23,42,0.95)",
     border: "1px dashed #1f2937",
   },
-
   callsHeaderRow: {
     display: "flex",
     justifyContent: "space-between",
     alignItems: "center",
     marginBottom: 6,
   },
-
   callsTitle: { fontSize: 16, fontWeight: 600, opacity: 0.9 },
-
   callsPhoneRow: {
     display: "flex",
     justifyContent: "space-between",
@@ -1214,9 +1306,7 @@ const styles = {
     gap: 8,
     marginBottom: 8,
   },
-
-  callsPhoneText: { fontSize: 14, opacity: 0.85 },
-
+  callsPhoneText: { fontSize: 16, opacity: 0.85 },
   smallToggleBtn: {
     padding: "6px 10px",
     borderRadius: 8,
@@ -1225,10 +1315,9 @@ const styles = {
     color: "#e5e7eb",
     cursor: "pointer",
     fontWeight: 700,
-    fontSize: 12,
+    fontSize: 16,
     whiteSpace: "nowrap",
   },
-
   smsNavRow: {
     marginTop: 10,
     paddingTop: 10,
@@ -1238,7 +1327,6 @@ const styles = {
     justifyContent: "space-between",
     gap: 10,
   },
-
   smsNavBtn: {
     padding: "8px 12px",
     borderRadius: 10,
@@ -1247,11 +1335,10 @@ const styles = {
     color: "#e5e7eb",
     cursor: "pointer",
     fontWeight: 900,
-    fontSize: 12,
+    fontSize: 16,
     whiteSpace: "nowrap",
   },
-
-  smsNavHelp: { fontSize: 12, color: "#94a3b8" },
+  smsNavHelp: { fontSize: 16, color: "#94a3b8" },
 
   notesBox: {
     padding: "10px 12px",
@@ -1273,72 +1360,43 @@ const styles = {
     cursor: "pointer",
   },
 
-  timelineBox: {
+  recordingsRefreshBtn: {
+    padding: "6px 10px",
     borderRadius: 10,
-    border: "1px solid rgba(148,163,184,0.22)",
-    background: "rgba(2,6,23,0.35)",
-    padding: "10px",
-    marginBottom: 10,
-    overflowY: "auto",
-    maxHeight: 240,
-  },
-
-  timelineSectionHeader: {
-    fontSize: 12,
-    fontWeight: 900,
+    border: "1px solid rgba(255,255,255,0.18)",
+    background: "rgba(255,255,255,0.08)",
     color: "#e5e7eb",
-    opacity: 0.9,
-    marginBottom: 6,
-  },
-
-  timelineEmpty: {
-    fontSize: 12,
+    cursor: "pointer",
     fontWeight: 800,
+  },
+  recordingsEmpty: {
     color: "#94a3b8",
-    padding: "4px 0 10px",
+    fontSize: 14,
+    padding: "6px 2px",
   },
 
-  timelineError: {
-    fontSize: 12,
-    fontWeight: 900,
-    color: "#fecaca",
-    marginBottom: 8,
+  timelineContainer: {
+    flex: 1,
+    minHeight: 0,
   },
 
-  timelineItem: {
-    borderRadius: 10,
-    border: "1px solid rgba(148,163,184,0.14)",
-    background: "rgba(2,6,23,0.45)",
-    padding: "8px 10px",
-    marginBottom: 8,
-  },
-
-  timelineMetaRow: {
+  entriesList: {
+    overflowY: "auto",
+    paddingRight: 6,
+    paddingBottom: 6,
     display: "flex",
-    justifyContent: "space-between",
-    gap: 10,
-    marginBottom: 6,
+    flexDirection: "column",
+    gap: 8,
+    flex: 1,
+    minHeight: 0,
   },
 
-  timelineStamp: {
-    fontSize: 12,
-    fontWeight: 800,
-    color: "#e5e7eb",
-    opacity: 0.88,
-    minHeight: 16,
-  },
-
-  timelineAudio: {
-    width: "100%",
-    height: 28,
-  },
-
-  timelineNoteBody: {
-    whiteSpace: "pre-wrap",
-    fontSize: 13,
-    color: "#e5e7eb",
-    opacity: 0.92,
-    lineHeight: 1.35,
+  timelineRow: {
+    display: "flex",
+    gap: 8,
+    alignItems: "flex-start",
+    padding: "6px 8px",
+    borderBottom: "1px solid rgba(148,163,184,0.06)",
   },
 
   notesTextarea: {
@@ -1350,7 +1408,10 @@ const styles = {
     color: "#fff",
     lineHeight: 1.5,
     resize: "none",
-    fontFamily: 'Arial, "Helvetica Neue", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+    overflow: "hidden",
+    height: "92px",
+    fontFamily:
+      'Arial, "Helvetica Neue", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
   },
 
   addTaskSection: {
@@ -1405,7 +1466,7 @@ const styles = {
     padding: "6px 10px",
     background: "#22c55e",
     color: "#fff",
-    fontWeight: 900,
+    fontWeight: 600,
     cursor: "pointer",
     whiteSpace: "nowrap",
   },
@@ -1443,7 +1504,7 @@ const styles = {
     marginBottom: 6,
   },
 
-  calendarHeaderLabel: { fontSize: 12, fontWeight: 700 },
+  calendarHeaderLabel: { fontSize: 16, fontWeight: 500 },
 
   calendarNavBtn: {
     borderRadius: 999,
@@ -1452,7 +1513,7 @@ const styles = {
     background: "transparent",
     color: "#e5e7eb",
     cursor: "pointer",
-    fontSize: 11,
+    fontSize: 16,
   },
 
   calendarWeekdays: {
@@ -1462,7 +1523,7 @@ const styles = {
     marginBottom: 2,
   },
 
-  calendarWeekday: { fontSize: 10, textAlign: "center", opacity: 0.7 },
+  calendarWeekday: { fontSize: 16, textAlign: "center", opacity: 0.7 },
 
   calendarGrid: {
     display: "grid",
@@ -1478,7 +1539,7 @@ const styles = {
     border: "1px solid transparent",
     background: "rgba(15,23,42,0.95)",
     color: "#e5e7eb",
-    fontSize: 11,
+    fontSize: 16,
     cursor: "pointer",
   },
 
@@ -1486,7 +1547,7 @@ const styles = {
     background: "#22c55e",
     borderColor: "#22c55e",
     color: "#fff",
-    fontWeight: 900,
+    fontWeight: 600,
   },
 
   calendarDayToday: {
@@ -1507,8 +1568,8 @@ const styles = {
     marginBottom: 4,
   },
 
-  tasksTitle: { fontSize: 14, fontWeight: 700, opacity: 0.9 },
-  tasksLoading: { fontSize: 12, opacity: 0.7 },
+  tasksTitle: { fontSize: 16, fontWeight: 600, opacity: 0.9 },
+  tasksLoading: { fontSize: 16, opacity: 0.7 },
 
   taskList: {
     marginTop: 4,
@@ -1517,7 +1578,7 @@ const styles = {
     paddingRight: 4,
   },
 
-  taskEmptyText: { fontSize: 12, opacity: 0.7, margin: 0 },
+  taskEmptyText: { fontSize: 16, opacity: 0.7, margin: 0 },
 
   taskItem: {
     padding: "6px 8px",
@@ -1535,11 +1596,11 @@ const styles = {
   },
 
   taskStatusDot: { width: 8, height: 8, borderRadius: "999px" },
-  taskItemTitle: { fontSize: 13 },
+  taskItemTitle: { fontSize: 16 },
   taskItemMeta: { display: "flex", flexWrap: "wrap", gap: 6 },
 
   taskMetaChip: {
-    fontSize: 11,
+    fontSize: 16,
     padding: "2px 6px",
     borderRadius: 999,
     background: "rgba(148,163,184,0.2)",
@@ -1573,8 +1634,8 @@ const styles = {
     color: "#fff",
     cursor: "pointer",
     border: "1px solid rgba(255,255,255,0.16)",
-    fontSize: 13,
-    fontWeight: 800,
+    fontSize: 16,
+    fontWeight: 600,
   },
 
   saveBtn: {
@@ -1583,9 +1644,9 @@ const styles = {
     borderRadius: "10px",
     padding: "8px 14px",
     color: "#fff",
-    fontWeight: 900,
+    fontWeight: 600,
     cursor: "pointer",
-    fontSize: 13,
+    fontSize: 16,
   },
 
   automationPopover: {

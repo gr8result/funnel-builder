@@ -128,6 +128,25 @@ export default async function handler(req, res) {
 
     if (insErr) return res.status(500).json({ ok: false, error: insErr.message });
 
+    // Auto-flush this queued SMS
+    try {
+      const siteUrl = process.env.NEXT_PUBLIC_SITE_URL || 'http://localhost:3000';
+      const cronKey = process.env.CRON_SECRET || process.env.AUTOMATION_CRON_KEY || '';
+      
+      // Always try to flush - endpoint handles auth (dev mode allows no key)
+      const flushUrl = cronKey 
+        ? `${siteUrl}/api/smsglobal/flush-queue?key=${encodeURIComponent(cronKey)}&limit=1`
+        : `${siteUrl}/api/smsglobal/flush-queue?limit=1`;
+      
+      await fetch(flushUrl, {
+        method: 'GET',
+        headers: { 'Content-Type': 'application/json' },
+      }).catch(() => {}); // Silently fail if flush doesn't work
+    } catch (flushErr) {
+      // Flush error doesn't fail the response
+      console.error('Auto-flush SMS failed:', flushErr?.message || flushErr);
+    }
+
     return res.status(200).json({ ok: true, queued: 1, row: inserted });
   } catch (e) {
     return res.status(500).json({ ok: false, error: e?.message || "Server error" });

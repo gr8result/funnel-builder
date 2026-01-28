@@ -1,24 +1,10 @@
 // /pages/api/automation/members/add-list.js
-// FULL REPLACEMENT
+// FULL REPLACEMENT — combines best of both approaches
 //
-<<<<<<< HEAD
-// ✅ Correct ownership check:
-//    - automation_flows.user_id is accounts.id
-//    - request user is auth.users.id
-//    - so we map auth uid -> accounts.id and compare to flow.user_id
-//
-// ✅ Correct list membership source:
-//    - Imports leads via public.lead_list_members (NOT leads.list_id, NOT email_list_members)
-//
-// ✅ Inserts automation_flow_members with:
-//    - user_id = auth uid (matches your automation_flow_members schema)
-//    - flow_id, lead_id
-//
-// ✅ Idempotent via upsert on (flow_id, lead_id)
-=======
-// ✅ Imports automation members from *public.leads.list_id* (NOT lead_list_members)
+// ✅ Imports automation members from leads.list_id (authoritative source)
 // ✅ Multi-tenant safe (user must own the flow + leads)
-// ✅ Idempotent: won't duplicate members if run multiple times
+// ✅ Correct ownership check: maps auth uid -> accounts.id and compares to flow.user_id
+// ✅ Idempotent: won't duplicate members, handles user_id column gracefully
 //
 // Expects JSON body:
 //  { "flow_id": "<uuid>", "list_id": "<uuid>" }
@@ -26,7 +12,7 @@
 // Requires env:
 //  NEXT_PUBLIC_SUPABASE_URL (or SUPABASE_URL)
 //  SUPABASE_SERVICE_ROLE_KEY (or SUPABASE_SERVICE_ROLE / SUPABASE_SERVICE_KEY / SUPABASE_SERVICE)
->>>>>>> 524cfe9 (WIP: autoresponder + automation + sms fixes)
+//  NEXT_PUBLIC_SUPABASE_ANON_KEY
 
 import { createClient } from "@supabase/supabase-js";
 
@@ -41,11 +27,8 @@ const SERVICE_KEY =
     process.env.SUPABASE_SERVICE ||
     ""
   ).trim();
-<<<<<<< HEAD
 
 const ANON_KEY = (process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || "").trim();
-=======
->>>>>>> 524cfe9 (WIP: autoresponder + automation + sms fixes)
 
 function msg(err) {
   return err?.message || err?.hint || err?.details || String(err || "");
@@ -58,7 +41,6 @@ function getBearer(req) {
 }
 
 export default async function handler(req, res) {
-<<<<<<< HEAD
   if (req.method !== "POST") return res.status(405).json({ ok: false, error: "POST only" });
 
   if (!SUPABASE_URL || !SERVICE_KEY || !ANON_KEY) {
@@ -75,34 +57,13 @@ export default async function handler(req, res) {
 
   const token = getBearer(req);
   if (!token) return res.status(401).json({ ok: false, error: "Missing Bearer token" });
-=======
-  if (req.method !== "POST") {
-    return res.status(405).json({ ok: false, error: "POST only" });
-  }
-
-  if (!SUPABASE_URL || !SERVICE_KEY) {
-    return res
-      .status(500)
-      .json({ ok: false, error: "Missing SUPABASE_URL or SERVICE KEY env" });
-  }
-
-  const token = getBearer(req);
-  if (!token) {
-    return res.status(401).json({ ok: false, error: "Missing Bearer token" });
-  }
->>>>>>> 524cfe9 (WIP: autoresponder + automation + sms fixes)
 
   const supabaseAdmin = createClient(SUPABASE_URL, SERVICE_KEY, {
     auth: { persistSession: false, autoRefreshToken: false },
   });
 
-<<<<<<< HEAD
   // Authenticated client to read the current user
   const supabaseUser = createClient(SUPABASE_URL, ANON_KEY, {
-=======
-  // Identify the current user from the Bearer token
-  const supabaseUser = createClient(SUPABASE_URL, process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || "", {
->>>>>>> 524cfe9 (WIP: autoresponder + automation + sms fixes)
     auth: { persistSession: false, autoRefreshToken: false },
     global: { headers: { Authorization: `Bearer ${token}` } },
   });
@@ -128,7 +89,6 @@ export default async function handler(req, res) {
   }
 
   try {
-<<<<<<< HEAD
     // 1) Resolve account_id for this auth user (accounts.id)
     const { data: acct, error: acctErr } = await supabaseAdmin
       .from("accounts")
@@ -143,19 +103,12 @@ export default async function handler(req, res) {
     const { data: flow, error: flowErr } = await supabaseAdmin
       .from("automation_flows")
       .select("id,user_id,name,is_standard")
-=======
-    // Confirm flow belongs to this user
-    const { data: flow, error: flowErr } = await supabaseAdmin
-      .from("automation_flows")
-      .select("id,user_id,name")
->>>>>>> 524cfe9 (WIP: autoresponder + automation + sms fixes)
       .eq("id", flow_id)
       .maybeSingle();
 
     if (flowErr) throw flowErr;
     if (!flow?.id) return res.status(404).json({ ok: false, error: "Flow not found" });
 
-<<<<<<< HEAD
     // Allow standard flows, otherwise require ownership match
     const owned =
       flow.is_standard === true ||
@@ -171,54 +124,7 @@ export default async function handler(req, res) {
       });
     }
 
-    // 3) Pull lead_ids from lead_list_members for this list
-    // and join to leads to ensure the leads belong to the same auth user.
-    const { data: rows, error: rowsErr } = await supabaseAdmin
-      .from("lead_list_members")
-      .select("lead_id, leads!inner(id,user_id)")
-      .eq("list_id", list_id)
-      .eq("leads.user_id", user.id)
-      .limit(10000);
-
-    if (rowsErr) throw rowsErr;
-
-    const leadIds = (rows || []).map((r) => r.lead_id).filter(Boolean);
-
-    if (!leadIds.length) {
-      return res.json({
-        ok: true,
-        flow_id,
-        list_id,
-        imported: 0,
-        skipped: 0,
-        message: "No leads found in that list for this user (lead_list_members -> leads.user_id).",
-      });
-    }
-
-    // 4) Upsert into automation_flow_members (your table requires user_id, flow_id, lead_id)
-    // NOTE: this requires a UNIQUE constraint on (flow_id, lead_id) for onConflict to work properly.
-    const now = new Date().toISOString();
-    const payload = leadIds.map((lead_id) => ({
-      user_id: user.id, // auth uid
-      flow_id,
-      lead_id,
-      status: "active",
-      source: "list_import",
-      created_at: now,
-      updated_at: now,
-    }));
-
-    const { error: upErr } = await supabaseAdmin
-      .from("automation_flow_members")
-      .upsert(payload, { onConflict: "flow_id,lead_id" });
-
-    if (upErr) throw upErr;
-=======
-    if (String(flow.user_id) !== String(user.id)) {
-      return res.status(403).json({ ok: false, error: "Not allowed for this flow" });
-    }
-
-    // Pull leads from leads.list_id (the authoritative source for NOW)
+    // 3) Pull leads from leads.list_id (the authoritative source)
     const { data: leads, error: leadsErr } = await supabaseAdmin
       .from("leads")
       .select("id,user_id,email,name,list_id")
@@ -239,9 +145,7 @@ export default async function handler(req, res) {
       });
     }
 
-    // Insert into automation_flow_members
-    // Expected columns: flow_id, lead_id, status, created_at
-    // If your table uses user_id too, we add it safely.
+    // 4) Insert into automation_flow_members with graceful user_id handling
     let imported = 0;
     let skipped = 0;
 
@@ -261,22 +165,27 @@ export default async function handler(req, res) {
         continue;
       }
 
+      // Try insert with user_id first (preferred)
       const { error: insErr } = await supabaseAdmin.from("automation_flow_members").insert({
         flow_id,
         lead_id: leadId,
+        user_id: user.id, // auth uid
         status: "active",
+        source: "list_import",
         created_at: new Date().toISOString(),
-        user_id: user.id, // harmless if column exists; if not, remove this line
+        updated_at: new Date().toISOString(),
       });
 
       if (insErr) {
-        // If user_id column doesn't exist, retry without it (one-time fallback)
+        // If user_id column doesn't exist or causes issues, retry without it
         if (String(insErr.message || "").toLowerCase().includes("user_id")) {
           const { error: ins2Err } = await supabaseAdmin.from("automation_flow_members").insert({
             flow_id,
             lead_id: leadId,
             status: "active",
+            source: "list_import",
             created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
           });
           if (ins2Err) throw ins2Err;
         } else {
@@ -286,21 +195,35 @@ export default async function handler(req, res) {
 
       imported++;
     }
->>>>>>> 524cfe9 (WIP: autoresponder + automation + sms fixes)
+
+    // 5) Automatically trigger the automation engine to start processing these new members
+    if (imported > 0) {
+      try {
+        const tickUrl = `${process.env.NEXTAUTH_URL || "http://localhost:3000"}/api/automation/engine/tick`;
+        const cron_secret = process.env.AUTOMATION_CRON_SECRET || process.env.AUTOMATION_CRON_KEY || process.env.CRON_SECRET || "";
+        
+        // Fire and forget - don't block the response
+        fetch(tickUrl, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-cron-key": cron_secret,
+          },
+          body: JSON.stringify({ flow_id, arm: "yes", max: 100 }),
+        }).catch((err) => console.error("Auto-tick failed:", err));
+      } catch (tickErr) {
+        console.error("Failed to trigger automation:", tickErr);
+        // Don't fail the response - import was successful
+      }
+    }
 
     return res.json({
       ok: true,
       flow_id,
       list_id,
-<<<<<<< HEAD
-      imported: leadIds.length,
-      skipped: 0,
-      note: "Upsert used (duplicates automatically ignored).",
-=======
       imported,
       skipped,
       total_in_list: leadIds.length,
->>>>>>> 524cfe9 (WIP: autoresponder + automation + sms fixes)
     });
   } catch (e) {
     return res.status(500).json({ ok: false, error: msg(e) });
