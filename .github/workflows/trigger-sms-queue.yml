@@ -15,4 +15,4 @@ jobs:
             -H "Authorization: Bearer ${{ secrets.SUPABASE_ANON_KEY }}" \
             -H "Content-Type: application/json" \
             -H "x-cron-secret: ${{ secrets.CRON_SECRET }}" \
-            https://bvtxfphktypdamlnveqf.supabase.co/functions/v1/process-sms-queue
+            "https://bvtxfphktypdqmlnveqf.supabase.co/functions/v1/process-sms-queue"
