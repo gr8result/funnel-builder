@@ -11,7 +11,10 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "autoresponder:cron": "node scripts/local-autoresponder-cron.js"
+    "autoresponder:cron": "node scripts/local-autoresponder-cron.js",
+    "automation": "node scripts/automation-scheduler.js",
+    "worker": "node scripts/run-worker.js",
+    "worker:direct": "node scripts/sendEmailWorker.js"
   },
   "dependencies": {
     "@craftjs/core": "^0.2.12",
@@ -36,7 +39,7 @@
     "lucide-react": "^0.545.0",
     "mhtml2html": "^3.0.0",
     "micro": "^10.0.1",
-    "next": "^15.0.4",
+    "next": "^16.1.6",
     "node-fetch": "^3.3.2",
     "node-red-node-email": "^5.0.0",
     "nodemailer": "^7.0.10",
@@ -54,6 +57,7 @@
     "resend": "^6.1.2",
     "stripe": "^18.5.0",
     "tr46": "^4.1.1",
+    "tweetnacl": "^1.0.3",
     "twilio": "^5.10.7",
     "whatwg-url": "^15.1.0",
     "zustand": "^5.0.8"
