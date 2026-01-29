@@ -102,7 +102,7 @@ serve(async (req) => {
       expectedSecret
     )}&limit=${BATCH_LIMIT}`;
 
-    console.log(`[${nowISO()}] Calling flush-queue endpoint: ${flushUrl}`);
+    console.log(`[${nowISO()}] Calling flush-queue endpoint (URL redacted for security)`);
 
     // Call the Next.js API endpoint
     const flushResponse = await fetchWithTimeout(
