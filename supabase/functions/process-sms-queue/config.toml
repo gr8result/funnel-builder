@@ -1,0 +1,3 @@
+# /supabase/functions/process-sms-queue/config.toml
+name = "process-sms-queue"
+verify_jwt = false

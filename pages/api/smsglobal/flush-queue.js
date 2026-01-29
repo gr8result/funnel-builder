@@ -12,6 +12,7 @@
 // ✅ Updates: status + sent_at + provider_message_id/provider_id + last_error/error
 // ✅ Handles your schema: scheduled_for + available_at + provider_message_id + last_error
 // ✅ Works with integer sms_queue.id
+// ✅ Uses shared sendSmsGlobal from lib/smsglobal/index.js for proper MAC auth
 //
 // Query params:
 //   limit=50 (default 25, max 200)
@@ -23,12 +24,13 @@
 //   SUPABASE_SERVICE_ROLE_KEY (or SUPABASE_SERVICE_ROLE / SUPABASE_SERVICE_KEY / SUPABASE_SERVICE)
 //
 //   SMSGLOBAL_API_KEY
-//   SMSGLOBAL_API_SECRET (or SMSGLOBAL_API_SECRET / SMSGLOBAL_API_SECRET)
+//   SMSGLOBAL_API_SECRET
 //   DEFAULT_SMS_ORIGIN (optional)
 //   SMSGLOBAL_ALLOWED_ORIGINS (optional comma list)
 //   CRON_SECRET (or AUTOMATION_CRON_KEY)  <-- Option B key
 
 import { createClient } from "@supabase/supabase-js";
+import { sendSmsGlobal } from "../../../lib/smsglobal/index.js";
 
 const SUPABASE_URL =
   process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL;
@@ -41,14 +43,6 @@ const SERVICE_KEY =
   process.env.SUPABASE_SERVICE_KEY ||
   process.env.SUPABASE_SERVICE_ROLE ||
   process.env.SUPABASE_SERVICE;
-
-const SMSGLOBAL_API_KEY =
-  process.env.SMSGLOBAL_API_KEY || process.env.SMSGLOBAL_KEY;
-
-const SMSGLOBAL_API_SECRET =
-  process.env.SMSGLOBAL_API_SECRET ||
-  process.env.SMSGLOBAL_SECRET ||
-  process.env.SMSGLOBAL_API_SECRET;
 
 const DEFAULT_SMS_ORIGIN = (process.env.DEFAULT_SMS_ORIGIN || "gr8result").trim();
 
@@ -135,47 +129,6 @@ function getRowMessage(row) {
 
 function getRowId(row) {
   return row?.id; // integer in your table
-}
-
-async function sendViaSmsGlobal({ to, message, origin }) {
-  if (!SMSGLOBAL_API_KEY || !SMSGLOBAL_API_SECRET) {
-    const err = new Error("Missing SMSGlobal env (SMSGLOBAL_API_KEY / SMSGLOBAL_API_SECRET).");
-    err.code = "missing_env";
-    throw err;
-  }
-
-  const url = "https://api.smsglobal.com/v2/sms/";
-  const auth = Buffer.from(`${SMSGLOBAL_API_KEY}:${SMSGLOBAL_API_SECRET}`).toString("base64");
-
-  const payload = {
-    origin: origin || pickOrigin(),
-    destination: to,
-    message,
-  };
-
-  const r = await fetch(url, {
-    method: "POST",
-    headers: {
-      Authorization: `Basic ${auth}`,
-      "Content-Type": "application/json",
-      Accept: "application/json",
-    },
-    body: JSON.stringify(payload),
-  });
-
-  const j = await r.json().catch(() => ({}));
-
-  if (!r.ok) {
-    return { ok: false, status: r.status, body: j };
-  }
-
-  const provider_id =
-    (Array.isArray(j?.messages) && j.messages[0]?.id) ||
-    j?.messageId ||
-    j?.id ||
-    "";
-
-  return { ok: true, provider_id, raw: j };
 }
 
 async function updateRow(supabaseAdmin, id, patch) {
@@ -322,8 +275,8 @@ export default async function handler(req, res) {
     await updateRow(supabaseAdmin, id, { status: "sending", last_error: null, error: null });
 
     try {
-      const out = await sendViaSmsGlobal({
-        to,
+      const out = await sendSmsGlobal({
+        toPhone: to,
         message,
         origin: s(row?.origin) || pickOrigin(),
       });
@@ -333,16 +286,16 @@ export default async function handler(req, res) {
 
         await updateRow(supabaseAdmin, id, {
           status: "failed",
-          last_error: `SMSGlobal HTTP ${out.status}`,
+          last_error: `SMSGlobal HTTP ${out.http}`,
           error: JSON.stringify(out.body || {}),
-          smsglobal_http: out.status,
+          smsglobal_http: out.http,
         });
 
         results.push({
           id,
           ok: false,
           error: "SMSGlobal request failed",
-          smsglobal_http: out.status,
+          smsglobal_http: out.http,
           detail: out.body || {},
         });
         continue;
@@ -350,16 +303,23 @@ export default async function handler(req, res) {
 
       sent++;
 
+      // Extract provider_id from response body
+      const provider_id = 
+        (Array.isArray(out.body?.messages) && out.body.messages[0]?.id) ||
+        out.body?.messageId ||
+        out.body?.id ||
+        "";
+
       await updateRow(supabaseAdmin, id, {
         status: "sent",
         sent_at: nowIso,
-        provider_message_id: out.provider_id || "",
-        provider_id: out.provider_id || "",
+        provider_message_id: provider_id || "",
+        provider_id: provider_id || "",
         last_error: null,
         error: null,
       });
 
-      results.push({ id, ok: true, provider_id: out.provider_id || "" });
+      results.push({ id, ok: true, provider_id: provider_id || "" });
     } catch (e) {
       failed++;
 
