@@ -13,6 +13,7 @@ export default function ConditionNodeDrawer({ node, onSave, onClose }) {
   const [productName, setProductName] = useState(initial.productName || "");
   const [url, setUrl] = useState(initial.url || "");
   const [cartTimeout, setCartTimeout] = useState(initial.cartTimeout || 30);
+  const [waitDays, setWaitDays] = useState(initial.waitDays !== undefined ? initial.waitDays : 3);
 
   const saveAndClose = () => {
     const newData = {
@@ -27,6 +28,7 @@ export default function ConditionNodeDrawer({ node, onSave, onClose }) {
         productName,
         url,
         cartTimeout,
+        waitDays,
       },
     };
 
@@ -67,6 +69,7 @@ export default function ConditionNodeDrawer({ node, onSave, onClose }) {
             <option value="field_starts_with">Field Starts With</option>
             <option value="field_ends_with">Field Ends With</option>
             <option value="email_opened">Email Opened</option>
+            <option value="email_not_opened">Email Not Opened (after delay)</option>
             <option value="link_clicked">Link Clicked</option>
             <option value="product_purchased">Product Purchased</option>
             <option value="event">Custom Event</option>
@@ -119,6 +122,32 @@ export default function ConditionNodeDrawer({ node, onSave, onClose }) {
                 style={s.input}
                 placeholder="Which email to check?"
               />
+            </>
+          )}
+
+          {/* EMAIL NOT OPENED */}
+          {type === "email_not_opened" && (
+            <>
+              <label style={s.label}>Email ID or Name</label>
+              <input
+                value={value}
+                onChange={(e) => setValue(e.target.value)}
+                style={s.input}
+                placeholder="Which email to check?"
+              />
+
+              <label style={s.label}>Wait (days)</label>
+              <input
+                type="number"
+                min={1}
+                value={waitDays}
+                onChange={(e) => setWaitDays(Number(e.target.value))}
+                style={s.input}
+                placeholder="e.g. 3"
+              />
+              <p style={{ opacity: 0.7, marginTop: -6 }}>
+                If not opened within this time, route to the "No" path.
+              </p>
             </>
           )}
 

@@ -2,7 +2,10 @@ import { Handle, Position } from "reactflow";
 
 export default function ConditionNode({ data }) {
   const c = data.condition || {};
-  const summary = c.type || "No condition set";
+  const summary =
+    c.type === "email_not_opened"
+      ? `Email not opened in ${c.waitDays || 3} days`
+      : c.type || "No condition set";
 
   return (
     <div

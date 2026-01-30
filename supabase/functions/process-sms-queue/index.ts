@@ -73,6 +73,12 @@ serve(async (req) => {
     const expectedSecret = getEnvAny(["CRON_SECRET", "AUTOMATION_CRON_KEY"]);
     const gotSecret = clean(req.headers.get("x-cron-secret"));
 
+    console.log("Expected secret exists:", !!expectedSecret);
+    console.log("Got secret exists:", !!gotSecret);
+    console.log("Expected first 10:", expectedSecret.substring(0, 10));
+    console.log("Got first 10:", gotSecret.substring(0, 10));
+    console.log("Match:", gotSecret === expectedSecret);
+
     if (!expectedSecret) {
       return json(origin, 500, {
         ok: false,

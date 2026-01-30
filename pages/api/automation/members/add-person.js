@@ -316,7 +316,75 @@ export default async function handler(req, res) {
     // 2) Ensure run exists and is ACTIVE (this is what actually makes the flow move)
     const runInfo = await ensureOneRun({ flow_id, user_id, lead_id });
 
-    // 3) Kick the engine once so it starts immediately
+    // 3) Queue the first email node after trigger (if it exists)
+    try {
+      const { data: flow, error: flowErr } = await supabaseAdmin
+        .from("automation_flows")
+        .select("nodes,edges")
+        .eq("id", flow_id)
+        .single();
+
+      if (!flowErr && flow) {
+        const nodes = (() => {
+          try {
+            const n = flow.nodes;
+            return typeof n === 'string' ? JSON.parse(n) : (Array.isArray(n) ? n : []);
+          } catch {
+            return [];
+          }
+        })();
+        
+        const edges = (() => {
+          try {
+            const e = flow.edges;
+            return typeof e === 'string' ? JSON.parse(e) : (Array.isArray(e) ? e : []);
+          } catch {
+            return [];
+          }
+        })();
+
+        // Find trigger and first email after it
+        const trigger = nodes.find(n => n?.type === "trigger");
+        if (trigger) {
+          const firstEdge = edges.find(e => e?.source === trigger.id);
+          if (firstEdge) {
+            const firstEmail = nodes.find(n => n?.id === firstEdge.target && n?.type === "email");
+            if (firstEmail) {
+              const { data: leadData } = await supabaseAdmin
+                .from("leads")
+                .select("email")
+                .eq("id", lead_id)
+                .single();
+
+              if (leadData?.email) {
+                const emailNodeData = firstEmail?.data || {};
+                const now = new Date().toISOString();
+                
+                await supabaseAdmin.from("automation_email_queue").insert([{
+                  user_id,
+                  lead_id,
+                  flow_id,
+                  node_id: firstEmail.id,
+                  to_email: leadData.email,
+                  subject: emailNodeData.subject || emailNodeData.label || "Message",
+                  html_content: "",
+                  html_path: emailNodeData.htmlPath || emailNodeData.storagePath || "",
+                  bucket: emailNodeData.bucket || "email-user-assets",
+                  variant: emailNodeData.label || emailNodeData.name || "Email",
+                  status: "pending",
+                  created_at: now,
+                  updated_at: now,
+                }]);
+              }
+            }
+          }
+        }
+      }
+    } catch {
+      // if email queuing fails, don't fail the enrollment
+    }
+
+    // 4) Kick the engine once so it starts immediately
     await tickFlow(flow_id);
 
     return res.status(200).json({

@@ -149,6 +149,8 @@ export default async function handler(req, res) {
     let imported = 0;
     let skipped = 0;
 
+    const now = new Date().toISOString();
+
     for (const leadId of leadIds) {
       // Check if already exists
       const { data: existing, error: exErr } = await supabaseAdmin
@@ -166,14 +168,15 @@ export default async function handler(req, res) {
       }
 
       // Try insert with user_id first (preferred)
+      // Use the auth user_id for consistency with other endpoints
       const { error: insErr } = await supabaseAdmin.from("automation_flow_members").insert({
         flow_id,
         lead_id: leadId,
-        user_id: user.id, // auth uid
+        user_id: user.id, // Use auth user_id
         status: "active",
         source: "list_import",
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
+        created_at: now,
+        updated_at: now,
       });
 
       if (insErr) {
@@ -184,8 +187,8 @@ export default async function handler(req, res) {
             lead_id: leadId,
             status: "active",
             source: "list_import",
-            created_at: new Date().toISOString(),
-            updated_at: new Date().toISOString(),
+            created_at: now,
+            updated_at: now,
           });
           if (ins2Err) throw ins2Err;
         } else {
@@ -221,8 +224,11 @@ export default async function handler(req, res) {
       ok: true,
       flow_id,
       list_id,
+      inserted: imported,
       imported,
-      skipped,
+      reactivated: imported, // Show number of newly activated/imported members
+      existing: skipped,
+      total: leadIds.length,
       total_in_list: leadIds.length,
     });
   } catch (e) {

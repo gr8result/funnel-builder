@@ -438,9 +438,37 @@ export default async function handler(req, res) {
             debug.advanced += 1;
           }
         } else if (nodeType.includes("delay")) {
-          // delay node: wait N minutes then advance
-          const minutes = parseInt(nodeData.minutes || nodeData.delay_minutes || "1", 10) || 1;
-          const when = new Date(Date.now() + minutes * 60 * 1000).toISOString();
+          // delay node: wait based on delay config (relative/absolute)
+          const delay = nodeData.delay || {};
+          let whenMs = Date.now();
+
+          if (delay.mode === "absolute" && delay.date && delay.time) {
+            const whenIso = new Date(`${delay.date}T${delay.time}:00`).toISOString();
+            whenMs = new Date(whenIso).getTime();
+          } else if (delay.amount && delay.unit) {
+            const amount = Number(delay.amount || 0);
+            const unit = String(delay.unit || "minutes").toLowerCase();
+            const multipliers = {
+              minute: 60 * 1000,
+              minutes: 60 * 1000,
+              hour: 60 * 60 * 1000,
+              hours: 60 * 60 * 1000,
+              day: 24 * 60 * 60 * 1000,
+              days: 24 * 60 * 60 * 1000,
+              week: 7 * 24 * 60 * 60 * 1000,
+              weeks: 7 * 24 * 60 * 60 * 1000,
+              month: 30 * 24 * 60 * 60 * 1000,
+              months: 30 * 24 * 60 * 60 * 1000,
+            };
+            const mult = multipliers[unit] || multipliers.minutes;
+            whenMs = Date.now() + amount * mult;
+          } else {
+            // fallback to legacy minute fields
+            const minutes = parseInt(nodeData.minutes || nodeData.delay_minutes || "1", 10) || 1;
+            whenMs = Date.now() + minutes * 60 * 1000;
+          }
+
+          const when = new Date(whenMs).toISOString();
           const next = nextFrom(currentNodeId, edges);
 
           await supabase.from("automation_flow_runs").update({
@@ -460,32 +488,49 @@ export default async function handler(req, res) {
           let shouldWait = false; // whether to delay before evaluating
           
           // Handle different condition types
-          if (conditionType === "email_opened") {
+          if (conditionType === "email_opened" || conditionType === "email_not_opened") {
             // For email_opened condition:
             // 1. Check if there's a wait time (e.g., 1 day)
             // 2. If wait time not yet elapsed, hold the run
             // 3. If elapsed, check if email was opened
             
+            const waitDays = parseInt(condition.waitDays || condition.days_to_wait || "", 10);
             const waitHours = parseInt(condition.waitHours || condition.hours_to_wait || "24", 10) || 24;
-            const waitTime = waitHours * 60 * 60 * 1000;
-            
-            // Get the most recent email sent to this lead in this flow
-            const { data: emailQueue, error: eqErr } = await supabase
-              .from("automation_email_queue")
-              .select("id, created_at, opened_at")
-              .eq("flow_id", flow_id)
-              .eq("lead_id", r.lead_id)
-              .order("created_at", { ascending: false })
-              .limit(1)
-              .maybeSingle();
-            
-            if (!eqErr && emailQueue) {
-              const sentTime = new Date(emailQueue.created_at).getTime();
+            const waitTime = (Number.isFinite(waitDays) && waitDays > 0 ? waitDays * 24 : waitHours) * 60 * 60 * 1000;
+
+            const value = String(condition.value || "").trim();
+
+            // Try to find the most recent automation send for this lead
+            let sendRow = null;
+            try {
+              let query = supabase
+                .from("email_sends")
+                .select("id, status, last_event, last_event_at, sent_at, created_at, variant, subject, email")
+                .eq("email", lead.email)
+                .eq("email_type", "automation")
+                .order("sent_at", { ascending: false })
+                .order("created_at", { ascending: false })
+                .limit(20);
+
+              const { data: sends, error: sendErr } = await query;
+              if (!sendErr && Array.isArray(sends)) {
+                if (value) {
+                  sendRow = sends.find((s) => String(s.variant || "") === value || String(s.subject || "") === value) || sends[0] || null;
+                } else {
+                  sendRow = sends[0] || null;
+                }
+              }
+            } catch (e) {
+              debug.errors.push(`EMAIL_SENDS_QUERY_FAILED: ${e?.message || e}`);
+            }
+
+            if (sendRow) {
+              const sentAt = sendRow.sent_at || sendRow.created_at;
+              const sentTime = sentAt ? new Date(sentAt).getTime() : Date.now();
               const nowTime = Date.now();
               const elapsedTime = nowTime - sentTime;
-              
+
               if (elapsedTime < waitTime) {
-                // Wait time not yet elapsed, hold the run
                 const availableAt = new Date(sentTime + waitTime).toISOString();
                 await supabase.from("automation_flow_runs").update({
                   status: "pending",
@@ -495,10 +540,18 @@ export default async function handler(req, res) {
                 }).eq("id", r.id);
                 debug.advanced += 1;
                 continue;
-              } else {
-                // Wait time elapsed, check if email was opened
-                shouldTakeYesPath = !!emailQueue.opened_at;
               }
+
+              const opened =
+                String(sendRow.status || "").toLowerCase() === "opened" ||
+                String(sendRow.last_event || "").toLowerCase() === "open" ||
+                String(sendRow.status || "").toLowerCase() === "clicked" ||
+                String(sendRow.last_event || "").toLowerCase() === "click";
+
+              shouldTakeYesPath = conditionType === "email_opened" ? opened : !opened;
+            } else {
+              // No send record found; treat as not opened
+              shouldTakeYesPath = conditionType === "email_not_opened";
             }
           } else if (conditionType === "tag_exists") {
             // Check if lead has the tag

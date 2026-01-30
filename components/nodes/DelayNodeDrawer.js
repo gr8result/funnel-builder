@@ -8,8 +8,9 @@ export default function DelayNodeDrawer({ node, onSave, onClose }) {
   const [label, setLabel] = useState(node?.data?.label || "Delay");
   const [mode, setMode] = useState(initial.mode || "relative");
 
-  const [amount, setAmount] = useState(initial.amount || 1);
-  const [unit, setUnit] = useState(initial.unit || "days");
+  // Use explicit values from initial, not default fallbacks for amount/unit
+  const [amount, setAmount] = useState(initial.amount !== undefined ? initial.amount : 1);
+  const [unit, setUnit] = useState(initial.unit || "minutes");
 
   const [date, setDate] = useState(initial.date || "");
   const [time, setTime] = useState(initial.time || "");

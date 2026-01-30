@@ -124,18 +124,18 @@ function AutomationBuilder() {
     setFlushingQueue(true);
     try {
       const token = await getToken();
-      const res = await fetch('/api/automation/email/flush-queue', {
+      const res = await fetch('/api/automation/email/process-queue', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-cron-key': process.env.NEXT_PUBLIC_CRON_SECRET || '',
           'Authorization': `Bearer ${token}`,
         },
+        body: JSON.stringify({ max: 100 }),
       });
 
       const result = await res.json();
       if (result.ok) {
-        toastMsg(`✅ Sent ${result.debug?.sent || 0} emails`);
+        toastMsg(`✅ Sent ${result.sent || 0} emails (${result.failed || 0} failed)`);
         await fetchQueueStatus(); // Refresh status
       } else {
         alert('Flush failed: ' + (result.error || 'Unknown error'));
@@ -147,6 +147,59 @@ function AutomationBuilder() {
     }
   };
 
+  const cleanupDuplicates = async () => {
+    if (!confirm('Remove duplicate flows? (Keeps most recent version of each name)')) return;
+    
+    try {
+      const token = await getToken();
+      const res = await fetch('/api/automation/flows/cleanup-duplicates', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`,
+        },
+      });
+
+      const result = await res.json();
+      if (result.ok) {
+        toastMsg(`✅ ${result.message}`);
+        await fetchFlows(accountId, authUserId); // Refresh flows list
+      } else {
+        alert("Cleanup failed: " + (result.error || "Unknown error"));
+      }
+    } catch (err) {
+      alert("Error cleaning up: " + err.message);
+    }
+  };
+
+  const deleteFlow = async (flowIdToDelete, flowName) => {
+    if (!confirm(`Delete "${flowName}"? This cannot be undone.`)) return;
+    
+    try {
+      const token = await getToken();
+      const res = await fetch(`/api/automation/flows/${flowIdToDelete}/delete`, {
+        method: 'DELETE',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`,
+        },
+      });
+
+      const result = await res.json();
+      if (result.ok) {
+        toastMsg(`✅ Flow deleted`);
+        await fetchFlows(accountId, authUserId); // Refresh flows list
+        if (flowId === flowIdToDelete) {
+          setFlowId(null); // Clear current flow if it was deleted
+        }
+      } else {
+        alert("Delete failed: " + (result.error || "Unknown error"));
+      }
+    } catch (err) {
+      alert("Error deleting: " + err.message);
+    }
+  };
+
   const resetFlow = async () => {
     if (!flowId) {
       alert("No flow selected");
@@ -155,9 +208,13 @@ function AutomationBuilder() {
 
     setIsResetting(true);
     try {
+      const token = await getToken();
       const res = await fetch(`/api/automation/flows/${flowId}/reset`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { 
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${token}`,
+        },
         body: JSON.stringify({ confirm_deletion: true }),
       });
 
@@ -768,14 +825,46 @@ function AutomationBuilder() {
                     </div>
 
                     {personalFlows.map((f) => (
-                      <DropdownItem
+                      <div
                         key={f.id}
-                        label={f.name || "My Flow"}
-                        onClick={() => {
-                          loadFlow(f.id);
-                          setFileMenuOpen(false);
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'space-between',
+                          padding: '8px 16px',
+                          cursor: 'pointer',
+                          transition: 'background 0.2s',
                         }}
-                      />
+                        onMouseEnter={(e) => e.currentTarget.style.background = '#1e293b'}
+                        onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}
+                      >
+                        <span
+                          onClick={() => {
+                            loadFlow(f.id);
+                            setFileMenuOpen(false);
+                          }}
+                          style={{ flex: 1 }}
+                        >
+                          {f.name || "My Flow"}
+                        </span>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            deleteFlow(f.id, f.name || "My Flow");
+                          }}
+                          style={{
+                            background: 'transparent',
+                            border: 'none',
+                            color: '#ef4444',
+                            cursor: 'pointer',
+                            padding: '4px 8px',
+                            fontSize: '16px',
+                          }}
+                          title="Delete flow"
+                        >
+                          🗑️
+                        </button>
+                      </div>
                     ))}
 
                     <Divider />
@@ -814,6 +903,13 @@ function AutomationBuilder() {
                       label="⬇ Export Flow (.json)"
                       onClick={() => {
                         exportFlow();
+                        setFileMenuOpen(false);
+                      }}
+                    />
+                    <DropdownItem
+                      label="🧹 Remove Duplicates"
+                      onClick={() => {
+                        cleanupDuplicates();
                         setFileMenuOpen(false);
                       }}
                     />
@@ -897,25 +993,7 @@ function AutomationBuilder() {
                 🔄 Reset Flow
               </button>
 
-              {queueStatus?.queue?.counts?.pending > 0 && (
-                <button
-                  onClick={flushQueue}
-                  disabled={flushingQueue}
-                  style={{
-                    background: "#f59e0b",
-                    border: "none",
-                    color: "#ffffff",
-                    padding: "8px 14px",
-                    borderRadius: 999,
-                    fontWeight: 900,
-                    cursor: flushingQueue ? "not-allowed" : "pointer",
-                    boxShadow: "0 0 18px rgba(245,158,11,0.18)",
-                    opacity: flushingQueue ? 0.6 : 1,
-                  }}
-                >
-                  {flushingQueue ? "⏳ Sending..." : "📤 Flush Queue"}
-                </button>
-              )}
+
 
               <button
                 onClick={saveFlow}

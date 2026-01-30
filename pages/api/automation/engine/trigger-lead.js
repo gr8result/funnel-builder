@@ -22,15 +22,6 @@ function getBearer(req) {
   return m ? m[1] : null;
 }
 
-function safeJson(v, fallback) {
-  try {
-    if (typeof v === "string") return JSON.parse(v || "null") ?? fallback;
-    return v ?? fallback;
-  } catch {
-    return fallback;
-  }
-}
-
 async function getAccountId(auth_user_id) {
   try {
     const { data } = await supabaseAdmin
@@ -44,101 +35,33 @@ async function getAccountId(auth_user_id) {
   }
 }
 
-function findFirstEmailAfterTrigger(nodes, edges) {
-  const trigger = (nodes || []).find((n) => n?.type === "trigger");
-  if (!trigger) return null;
-
-  // direct edge from trigger -> email
-  const out = (edges || []).find((e) => e?.source === trigger.id);
-  if (!out) return null;
-
-  const email = (nodes || []).find((n) => n?.id === out.target && n?.type === "email");
-  return email || null;
+function baseUrl() {
+  return (
+    process.env.NEXT_PUBLIC_SITE_URL ||
+    process.env.SITE_URL ||
+    "http://localhost:3000"
+  );
 }
 
-async function bestEffortAlreadyQueued({ lead_id, template_id, flow_id, node_id }) {
-  // This tries to detect duplicates without knowing your exact schema.
-  // If any query fails, we assume "not queued" and proceed.
-  const filters = [
-    async () => {
-      const { count, error } = await supabaseAdmin
-        .from("email_campaign_queue")
-        .select("id", { count: "exact", head: true })
-        .eq("lead_id", lead_id)
-        .eq("template_id", template_id)
-        .eq("flow_id", flow_id)
-        .eq("node_id", node_id)
-        .in("status", ["queued", "processing", "sent"]);
-      if (error) throw error;
-      return (count || 0) > 0;
-    },
-    async () => {
-      const { count, error } = await supabaseAdmin
-        .from("email_campaign_queue")
-        .select("id", { count: "exact", head: true })
-        .eq("lead_id", lead_id)
-        .eq("template_id", template_id)
-        .in("status", ["queued", "processing", "sent"]);
-      if (error) throw error;
-      return (count || 0) > 0;
-    },
-    async () => {
-      const { count, error } = await supabaseAdmin
-        .from("email_campaign_queue")
-        .select("id", { count: "exact", head: true })
-        .eq("lead_id", lead_id)
-        .eq("template_id", template_id);
-      if (error) throw error;
-      return (count || 0) > 0;
-    },
-  ];
+async function tickFlow(flow_id) {
+  try {
+    const cronSecret =
+      process.env.AUTOMATION_CRON_SECRET ||
+      process.env.AUTOMATION_CRON_KEY ||
+      process.env.CRON_SECRET ||
+      "";
 
-  for (const fn of filters) {
-    try {
-      const ok = await fn();
-      if (ok) return true;
-    } catch {}
+    await fetch(`${baseUrl()}/api/automation/engine/tick`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(cronSecret ? { "x-cron-key": cronSecret } : {}),
+      },
+      body: JSON.stringify({ flow_id, max: 200 }),
+    });
+  } catch {
+    // don't fail trigger if tick fails
   }
-  return false;
-}
-
-async function tryInsertQueue(rows) {
-  // Try multiple payload shapes so it works with slightly different queue schemas.
-  const attempts = [
-    rows.map((r) => ({
-      user_id: r.user_id,
-      lead_id: r.lead_id,
-      template_id: r.template_id,
-      scheduled_at: r.scheduled_at,
-      status: r.status,
-      flow_id: r.flow_id,
-      node_id: r.node_id,
-      email_index: r.email_index,
-    })),
-    rows.map((r) => ({
-      user_id: r.user_id,
-      lead_id: r.lead_id,
-      template_id: r.template_id,
-      scheduled_at: r.scheduled_at,
-      status: r.status,
-      email_index: r.email_index,
-    })),
-    rows.map((r) => ({
-      user_id: r.user_id,
-      lead_id: r.lead_id,
-      template_id: r.template_id,
-      scheduled_at: r.scheduled_at,
-      status: r.status,
-    })),
-  ];
-
-  let lastErr = null;
-  for (const payload of attempts) {
-    const { error } = await supabaseAdmin.from("email_campaign_queue").insert(payload);
-    if (!error) return { ok: true };
-    lastErr = error;
-  }
-  return { ok: false, error: lastErr?.message || "Queue insert failed" };
 }
 
 export default async function handler(req, res) {
@@ -212,68 +135,13 @@ export default async function handler(req, res) {
       }
     }
 
-    const nodes = safeJson(flow.nodes, []);
-    const edges = safeJson(flow.edges, []);
-
-    const firstEmail = findFirstEmailAfterTrigger(nodes, edges);
-    if (!firstEmail) {
-      return res.json({
-        ok: true,
-        enrolled: true,
-        queued: 0,
-        message: "No Email node connected from Trigger.",
-      });
-    }
-
-    const template_id =
-      firstEmail?.data?.template_id ||
-      firstEmail?.data?.email_template_id ||
-      firstEmail?.data?.templateId ||
-      null;
-
-    if (!template_id) {
-      return res.status(400).json({ ok: false, error: "Email node missing template_id" });
-    }
-
-    // Best-effort duplicate protection
-    const already = await bestEffortAlreadyQueued({
-      lead_id,
-      template_id,
-      flow_id,
-      node_id: firstEmail.id,
-    });
-
-    if (already) {
-      return res.json({
-        ok: true,
-        enrolled: true,
-        queued: 0,
-        message: "Lead already has first email queued.",
-      });
-    }
-
-    const now = new Date().toISOString();
-    const rows = [
-      {
-        user_id: owner_id,
-        lead_id,
-        template_id,
-        scheduled_at: now,
-        status: "queued",
-        flow_id,
-        node_id: firstEmail.id,
-        email_index: 1,
-      },
-    ];
-
-    const ins = await tryInsertQueue(rows);
-    if (!ins.ok) return res.status(500).json({ ok: false, error: ins.error });
+    await tickFlow(flow_id);
 
     return res.json({
       ok: true,
       enrolled: true,
-      queued: 1,
-      message: "Lead triggered and first email queued.",
+      queued: 0,
+      message: "Lead triggered and flow processing started.",
     });
   } catch (e) {
     return res.status(500).json({ ok: false, error: e?.message || String(e) });
