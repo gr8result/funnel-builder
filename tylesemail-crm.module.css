@@ -1,3 +1,9 @@
+/* 
+THIS FILE WAS ACCIDENTALLY OVERWRITTEN WITH TERMINAL OUTPUT.
+Wrapping it in a comment so the build stops failing.
+
+Original contents preserved below:
+
 warning: in the working copy of 'jsconfig.json', LF will be replaced by CRLF the next time Git touches it
 warning: in the working copy of 'tsconfig.json', LF will be replaced by CRLF the next time Git touches it
 components/DashSide.old.js
@@ -74,3 +80,7 @@ templates/sales-long/index.html
 templates/sales-short/index.html
 tsconfig.json
 utils/supabase-client.js
+*/
+
+/* Keep at least one valid rule so the file is never “empty” */
+.__gr8_css_ok__ { display: block; }
