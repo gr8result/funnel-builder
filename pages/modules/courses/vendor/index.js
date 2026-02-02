@@ -1,121 +1,109 @@
-// /pages/modules/courses/vendor/index.js
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { useRouter } from "next/router";
-import ICONS from "../../../../components/iconMap";
 import { supabase } from "../../../../utils/supabase-client";
+import ICONS from "../../../../components/iconMap";
 
-export default function VendorCoursesHome() {
-  const router = useRouter();
-
+export default function VendorConsole() {
   const [loading, setLoading] = useState(true);
-  const [busy, setBusy] = useState(false);
-
-  const [userId, setUserId] = useState(null);
   const [vendor, setVendor] = useState(null);
   const [courses, setCourses] = useState([]);
+  const [showAgreement, setShowAgreement] = useState(false);
+  const [agreeChecked, setAgreeChecked] = useState(false);
+  const [savingAgreement, setSavingAgreement] = useState(false);
 
   useEffect(() => {
-    let alive = true;
+    load();
+  }, []);
 
-    async function load() {
-      setLoading(true);
+  async function load() {
+    setLoading(true);
 
-      const { data: auth } = await supabase.auth.getUser();
-      const uid = auth?.user?.id || null;
-      if (!alive) return;
+    const { data: auth } = await supabase.auth.getUser();
+    const userId = auth?.user?.id;
+    if (!userId) {
+      setLoading(false);
+      return;
+    }
 
-      setUserId(uid);
+    const { data: v } = await supabase
+      .from("course_vendors")
+      .select("*")
+      .eq("user_id", userId)
+      .maybeSingle();
 
-      if (!uid) {
-        setVendor(null);
-        setCourses([]);
-        setLoading(false);
-        return;
-      }
+    setVendor(v || null);
 
-      const { data: v, error: vErr } = await supabase
-        .from("course_vendors")
-        .select("*")
-        .eq("user_id", uid)
-        .maybeSingle();
-
-      if (vErr) console.error(vErr);
-      if (!alive) return;
-
-      if (!v?.id) {
-        setVendor(null);
-        setCourses([]);
-        setLoading(false);
-        return;
-      }
-
-      setVendor(v);
-
-      const { data: cs, error: cErr } = await supabase
+    if (v?.id) {
+      const { data: c } = await supabase
         .from("courses")
-        .select("id,title,description,is_published,created_at")
+        .select("*")
         .eq("vendor_id", v.id)
         .order("created_at", { ascending: false });
 
-      if (cErr) console.error(cErr);
-      if (!alive) return;
+      setCourses(c || []);
+    }
 
-      setCourses(cs || []);
-      setLoading(false);
+    setLoading(false);
+  }
+
+  async function acceptAgreement() {
+    if (!vendor?.id || !agreeChecked) return;
+
+    setSavingAgreement(true);
+
+    const { error } = await supabase
+      .from("course_vendors")
+      .update({
+        marketplace_terms_accepted: true,
+        marketplace_terms_accepted_at: new Date().toISOString(),
+      })
+      .eq("id", vendor.id);
+
+    setSavingAgreement(false);
+
+    if (error) {
+      alert(error.message);
+      return;
+    }
+
+    setShowAgreement(false);
+    load();
+  }
+
+  async function deleteCourse(courseId) {
+    if (!confirm("Delete this course permanently?")) return;
+
+    const { error } = await supabase
+      .from("courses")
+      .delete()
+      .eq("id", courseId);
+
+    if (error) {
+      alert(error.message);
+      return;
     }
 
     load();
-    return () => {
-      alive = false;
-    };
-  }, []);
-
-  async function createCourse() {
-    if (!vendor?.id) return alert("No vendor profile found.");
-    setBusy(true);
-    try {
-      const { data: created, error } = await supabase
-        .from("courses")
-        .insert({
-          vendor_id: vendor.id,
-          title: "New Course",
-          description: "",
-          is_published: false,
-        })
-        .select("id")
-        .single();
-
-      if (error) {
-        console.error(error);
-        alert(error.message || "Failed to create course");
-        return;
-      }
-
-      // ✅ Correct path in YOUR tree:
-      // /pages/modules/courses/[courseId]/edit.js
-      router.push(`/modules/courses/${created.id}/edit`);
-    } finally {
-      setBusy(false);
-    }
   }
+
+  const agreementAccepted = vendor?.marketplace_terms_accepted === true;
 
   return (
     <div style={page.wrap}>
       <div style={page.inner}>
         {/* Banner */}
         <div style={page.banner}>
-          <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+          <div style={{ display: "flex", gap: 14, alignItems: "center" }}>
             <div style={page.iconWrap}>
-              {ICONS.courses({ size: 32, color: "#fff" })}
+              {ICONS.courses({ size: 28, color: "#fff" })}
             </div>
             <div>
               <h1 style={page.title}>Vendor Console</h1>
-              <p style={page.subtitle}>Create and manage your courses.</p>
+              <p style={page.subtitle}>Create and manage your courses</p>
             </div>
           </div>
 
-          <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+          <div style={{ display: "flex", gap: 10 }}>
             <Link href="/modules/courses">
               <button style={page.backBtn}>← Marketplace</button>
             </Link>
@@ -125,177 +113,203 @@ export default function VendorCoursesHome() {
           </div>
         </div>
 
-        {/* Body */}
-        <div style={page.panel}>
-          {!userId ? (
-            <div style={page.empty}>
-              Please log in to access vendor tools.
-            </div>
-          ) : loading ? (
-            <div style={page.empty}>Loading…</div>
-          ) : !vendor?.id ? (
-            <div style={page.empty}>
-              No vendor profile found for your account.
-              <div style={{ marginTop: 10, opacity: 0.8 }}>
-                If you want, I’ll give you a simple “Become a Vendor” button/page next.
-              </div>
-            </div>
-          ) : (
-            <>
-              <div style={page.row}>
-                <div style={{ fontWeight: 900, fontSize: 16 }}>Your Courses</div>
+        {/* Agreement Gate */}
+        {!agreementAccepted && (
+          <div style={page.warning}>
+            Marketplace Agreement: <b>Not accepted</b>
+            <button
+              style={page.primaryBtn}
+              onClick={() => setShowAgreement(true)}
+            >
+              Review & Accept
+            </button>
+          </div>
+        )}
 
+        {/* Courses */}
+        <div style={page.panel}>
+          <div style={page.panelHeader}>
+            <h2>Your Courses</h2>
+            <button
+              style={page.primaryBtn}
+              disabled={!agreementAccepted}
+              onClick={() => location.href = "/modules/courses/create"}
+            >
+              + Create Course
+            </button>
+          </div>
+
+          {courses.map((c) => (
+            <div key={c.id} style={page.courseRow}>
+              <div>
+                <b>{c.title}</b>
+                <div style={{ opacity: 0.7 }}>
+                  {c.is_published ? "Published" : "Draft"}
+                </div>
+              </div>
+
+              <div style={{ display: "flex", gap: 8 }}>
+                <Link href={`/modules/courses/${c.id}/edit`}>
+                  <button style={page.secondaryBtn}>Edit</button>
+                </Link>
+                <Link href={`/modules/courses/${c.id}/pricing`}>
+                  <button style={page.secondaryBtn}>Pricing</button>
+                </Link>
+                <Link href={`/modules/courses/${c.id}/learn`}>
+                  <button style={page.secondaryBtn}>Preview</button>
+                </Link>
                 <button
-                  onClick={createCourse}
-                  disabled={busy}
-                  style={{
-                    ...page.primaryBtn,
-                    opacity: busy ? 0.7 : 1,
-                    cursor: busy ? "not-allowed" : "pointer",
-                  }}
+                  style={page.deleteBtn}
+                  onClick={() => deleteCourse(c.id)}
                 >
-                  {busy ? "Creating…" : "＋ Create Course"}
+                  Delete
                 </button>
               </div>
-
-              <div style={{ marginTop: 12, display: "grid", gap: 10 }}>
-                {courses.length === 0 ? (
-                  <div style={page.empty}>
-                    You haven’t created any courses yet.
-                    <div style={{ marginTop: 8, opacity: 0.8 }}>
-                      Click “Create Course” to begin.
-                    </div>
-                  </div>
-                ) : (
-                  courses.map((c) => (
-                    <div key={c.id} style={page.courseCard}>
-                      <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
-                        <div>
-                          <div style={{ fontWeight: 900 }}>
-                            {c.title || "Untitled Course"}{" "}
-                            <span style={{ opacity: 0.7, fontWeight: 800 }}>
-                              {c.is_published ? "• Published" : "• Draft"}
-                            </span>
-                          </div>
-                          <div style={{ marginTop: 6, opacity: 0.8, fontSize: 13 }}>
-                            {c.description ? c.description.slice(0, 140) : "No description yet."}
-                            {c.description && c.description.length > 140 ? "…" : ""}
-                          </div>
-                        </div>
-
-                        <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-                          <Link href={`/modules/courses/${c.id}/edit`}>
-                            <button style={page.secondaryBtn}>Edit →</button>
-                          </Link>
-                          <Link href={`/modules/courses/${c.id}/pricing`}>
-                            <button style={page.secondaryBtn}>Pricing →</button>
-                          </Link>
-                          <Link href={`/modules/courses/${c.id}/learn`}>
-                            <button style={page.secondaryBtn}>Preview →</button>
-                          </Link>
-                        </div>
-                      </div>
-                    </div>
-                  ))
-                )}
-              </div>
-
-              <div style={{ marginTop: 14, opacity: 0.7, fontSize: 12 }}>
-                Debug marker: <b>VENDOR-CONSOLE-v2</b>
-              </div>
-            </>
-          )}
+            </div>
+          ))}
         </div>
       </div>
+
+      {/* Agreement Modal */}
+      {showAgreement && (
+        <div style={modal.backdrop}>
+          <div style={modal.box}>
+            <h2>Marketplace Vendor Agreement</h2>
+
+            <div style={{ fontSize: 16, lineHeight: 1.55, marginTop: 12 }}>
+              By selling courses on this platform, you agree that:
+              <ul>
+                <li>The platform retains <b>30%</b> of each transaction.</li>
+                <li>Payouts are processed via Stripe / PayPal.</li>
+                <li>You are responsible for your course content.</li>
+              </ul>
+            </div>
+
+            <label style={modal.checkRow}>
+              <input
+                type="checkbox"
+                checked={agreeChecked}
+                onChange={(e) => setAgreeChecked(e.target.checked)}
+                style={{ width: 26, height: 26 }}
+              />
+              <span>I accept the Marketplace Vendor Agreement</span>
+            </label>
+
+            <div style={{ display: "flex", gap: 10, marginTop: 16 }}>
+              <button
+                style={page.secondaryBtn}
+                onClick={() => setShowAgreement(false)}
+              >
+                Cancel
+              </button>
+              <button
+                style={page.primaryBtn}
+                disabled={!agreeChecked || savingAgreement}
+                onClick={acceptAgreement}
+              >
+                {savingAgreement ? "Saving…" : "Accept"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
 const page = {
-  wrap: {
-    minHeight: "100vh",
-    background: "#0c121a",
-    color: "#fff",
-    padding: "28px 22px",
-    fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif",
-  },
-  inner: { width: "100%", maxWidth: 1320, margin: "0 auto" },
+  wrap: { minHeight: "100vh", background: "#0c121a", color: "#fff", padding: 24 },
+  inner: { maxWidth: 1320, margin: "0 auto" },
 
   banner: {
+    background: "#ec4899",
+    padding: 18,
+    borderRadius: 12,
     display: "flex",
     justifyContent: "space-between",
     alignItems: "center",
-    background: "#ec4899",
-    borderRadius: 12,
-    padding: "18px 22px",
     marginBottom: 18,
-    fontWeight: 700,
-    gap: 14,
   },
-  iconWrap: {
-    background: "rgba(255,255,255,0.18)",
-    borderRadius: "50%",
-    padding: 10,
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  title: { fontSize: 26, margin: 0 },
-  subtitle: { fontSize: 15, opacity: 0.9, margin: 0, marginTop: 4 },
+
+  iconWrap: { background: "rgba(255,255,255,.2)", padding: 10, borderRadius: "50%" },
+  title: { margin: 0 },
+  subtitle: { margin: 0, opacity: 0.9 },
 
   backBtn: {
     background: "#1e293b",
     color: "#fff",
     border: "1px solid #334155",
+    padding: "10px 16px",
     borderRadius: 8,
-    padding: "10px 18px",
-    fontSize: 14,
     fontWeight: 700,
-    cursor: "pointer",
-    whiteSpace: "nowrap",
   },
 
-  panel: {
-    background: "#111827",
-    border: "1px solid #1f2937",
-    borderRadius: 12,
+  warning: {
+    background: "#7c2d12",
     padding: 14,
+    borderRadius: 10,
+    marginBottom: 14,
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
   },
 
-  row: {
+  panel: { background: "#111827", borderRadius: 12, padding: 14 },
+  panelHeader: { display: "flex", justifyContent: "space-between", marginBottom: 12 },
+
+  courseRow: {
     display: "flex",
-    alignItems: "center",
     justifyContent: "space-between",
-    gap: 12,
+    padding: 12,
+    borderBottom: "1px solid #1f2937",
   },
 
   primaryBtn: {
     background: "#facc15",
-    color: "#000",
     border: "none",
-    borderRadius: 10,
     padding: "10px 14px",
-    fontSize: 14,
+    borderRadius: 8,
     fontWeight: 900,
   },
+
   secondaryBtn: {
     background: "#1e293b",
-    color: "#fff",
     border: "1px solid #334155",
-    borderRadius: 10,
-    padding: "10px 12px",
-    fontSize: 14,
-    fontWeight: 900,
-    cursor: "pointer",
-    whiteSpace: "nowrap",
+    padding: "10px 14px",
+    borderRadius: 8,
+    color: "#fff",
   },
 
-  courseCard: {
+  deleteBtn: {
+    background: "#7f1d1d",
+    border: "none",
+    padding: "10px 14px",
+    borderRadius: 8,
+    color: "#fff",
+  },
+};
+
+const modal = {
+  backdrop: {
+    position: "fixed",
+    inset: 0,
+    background: "rgba(0,0,0,.7)",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  box: {
     background: "#0b1220",
-    border: "1px solid #1f2937",
+    padding: 20,
     borderRadius: 12,
-    padding: 12,
+    maxWidth: 520,
+    width: "100%",
   },
-
-  empty: { padding: 14, opacity: 0.9 },
+  checkRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: 12,
+    marginTop: 16,
+    fontSize: 16,
+  },
 };

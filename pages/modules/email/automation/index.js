@@ -571,13 +571,25 @@ function AutomationBuilder() {
           }
           if (n.type === "condition") {
             const s = (j.stats || {})?.[n.id] || {};
+            const incomingEdge = (edges || []).find(
+              (e) => String(e?.target) === String(n.id)
+            );
+            const incomingNode = incomingEdge
+              ? nds.find((x) => String(x?.id) === String(incomingEdge.source))
+              : null;
+            const incomingEmailStats = incomingNode?.type === "email"
+              ? (j.stats || {})?.[incomingNode.id] || null
+              : null;
             return { 
               ...n, 
               data: { 
                 ...n.data, 
+                stats: s,
                 activeMembers: s.activeMembers || 0,
                 hoursRemaining: s.hoursRemaining || null,
                 waitHours: s.waitHours || 24,
+                incomingEmailStats,
+                incomingEmailLabel: incomingNode?.data?.label || "Previous Email",
               } 
             };
           }
@@ -585,7 +597,7 @@ function AutomationBuilder() {
         })
       );
     } catch {}
-  }, [flowId, setNodes]);
+  }, [flowId, setNodes, edges]);
 
   useEffect(() => {
     if (!flowId) return;

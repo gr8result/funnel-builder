@@ -1,60 +1,158 @@
 // /pages/api/automation/cron/send-emails.js
-// Cron job to automatically send queued emails
-// Can be called from external cron service or internal scheduler
-// Respects delay settings on delay nodes
+// FULL REPLACEMENT
+//
+// ✅ Sends queued emails from automation_email_queue
+// ✅ DOES NOT require automation_email_queue.html column
+// ✅ Gets html/subject from automation_flows.nodes JSON (email node data)
+// ✅ Updates queue row to status='sent' + sent_at + sendgrid_message_id (if those columns exist)
+//
+// POST body: { max?: number }
+// Auth: x-cron-key header OR ?key=... OR Authorization: Bearer ...
 
-import sgMail from "@sendgrid/mail";
 import { createClient } from "@supabase/supabase-js";
 
 const SUPABASE_URL =
-  process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL;
-const SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
-const SENDGRID_KEY = (process.env.SENDGRID_API_KEY || process.env.GR8_MAIL_SEND_ONLY || "").trim();
-const CRON_SECRET = (process.env.AUTOMATION_CRON_SECRET || process.env.AUTOMATION_CRON_KEY || process.env.CRON_SECRET || "").trim();
+  (process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL || "").trim();
+
+const SERVICE_KEY =
+  (
+    process.env.SUPABASE_SERVICE_ROLE_KEY ||
+    process.env.SUPABASE_SERVICE_ROLE ||
+    process.env.SUPABASE_SERVICE_KEY ||
+    process.env.SUPABASE_SERVICE ||
+    ""
+  ).trim();
+
+const CRON_SECRET =
+  (process.env.AUTOMATION_CRON_SECRET || "").trim() ||
+  (process.env.AUTOMATION_CRON_KEY || "").trim() ||
+  (process.env.CRON_SECRET || "").trim();
+
+const SENDGRID_KEY =
+  process.env.GR8_MAIL_SEND_ONLY || process.env.SENDGRID_API_KEY;
+
+const DEFAULT_FROM_EMAIL =
+  process.env.SENDGRID_FROM_EMAIL || "no-reply@gr8result.com";
+const DEFAULT_FROM_NAME =
+  process.env.SENDGRID_FROM_NAME || "GR8 RESULT";
 
 const supabaseAdmin = createClient(SUPABASE_URL, SERVICE_KEY, {
   auth: { persistSession: false, autoRefreshToken: false },
 });
 
-function getBearer(req) {
-  const h = (req.headers.authorization || "").trim();
-  return h.toLowerCase().startsWith("bearer ") ? h.slice(7).trim() : "";
-}
-
 function okAuth(req) {
   const secret = CRON_SECRET;
-  if (!secret) return true; // dev-safe
-  
-  const bearer = getBearer(req);
+  if (!secret) return true;
+  const h = (req.headers.authorization || "").trim();
+  const bearer = h.toLowerCase().startsWith("bearer ") ? h.slice(7).trim() : "";
   const q = (req.query.key || "").toString().trim();
   const x = (req.headers["x-cron-key"] || "").toString().trim();
-  
-  // Accept any of these
   return bearer === secret || q === secret || x === secret;
 }
 
-async function loadHtmlFromStorage(bucket, path) {
-  if (!path) return "";
+function safeJson(v, fallback) {
   try {
-    const { data, error } = await supabaseAdmin.storage.from(bucket).download(path);
-    if (error || !data) return "";
-    return await data.text();
+    if (v == null) return fallback;
+    if (typeof v === "string") return JSON.parse(v);
+    return v;
   } catch {
-    return "";
+    return fallback;
   }
 }
 
-// Helper: calculate send_at time based on delay in queue entry
-function getScheduledSendTime(queueEntry) {
-  const createdAt = new Date(queueEntry.created_at || new Date());
-  
-  // Check if there's a delay_until override
-  if (queueEntry.delay_until) {
-    return new Date(queueEntry.delay_until);
+function nowIso() {
+  return new Date().toISOString();
+}
+
+async function loadFlow(flow_id) {
+  const { data, error } = await supabaseAdmin
+    .from("automation_flows")
+    .select("id,user_id,nodes,edges,name,updated_at")
+    .eq("id", flow_id)
+    .maybeSingle();
+
+  if (error) throw new Error(error.message);
+  if (!data?.id) throw new Error("Flow not found");
+
+  const nodes = safeJson(data.nodes, []);
+  return { ...data, nodes: Array.isArray(nodes) ? nodes : [] };
+}
+
+function findNode(flow, nodeId) {
+  return (flow.nodes || []).find((n) => String(n?.id) === String(nodeId)) || null;
+}
+
+async function loadLead(lead_id) {
+  const { data, error } = await supabaseAdmin
+    .from("leads")
+    .select("id,email,name,phone")
+    .eq("id", lead_id)
+    .maybeSingle();
+
+  if (error) throw new Error(error.message);
+  if (!data?.id) throw new Error("Lead not found");
+  return data;
+}
+
+async function sendSendGrid({ toEmail, toName, fromEmail, fromName, subject, html, templateId, dynamicData }) {
+  if (!SENDGRID_KEY) throw new Error("Missing SENDGRID_API_KEY / GR8_MAIL_SEND_ONLY");
+  if (!toEmail) throw new Error("Missing lead email");
+
+  const payload = templateId
+    ? {
+        personalizations: [
+          {
+            to: [{ email: toEmail, name: toName || undefined }],
+            dynamic_template_data: dynamicData || {},
+          },
+        ],
+        from: { email: fromEmail, name: fromName },
+        template_id: templateId,
+      }
+    : {
+        personalizations: [
+          { to: [{ email: toEmail, name: toName || undefined }] },
+        ],
+        from: { email: fromEmail, name: fromName },
+        subject: subject || "Hello",
+        content: [{ type: "text/html", value: html || `<p>${subject || "Hello"}</p>` }],
+      };
+
+  const resp = await fetch("https://api.sendgrid.com/v3/mail/send", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${SENDGRID_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+
+  const status = resp.status;
+  const text = await resp.text().catch(() => "");
+  if (status !== 202) {
+    throw new Error(`SendGrid rejected (${status}): ${text.slice(0, 800)}`);
   }
-  
-  // Otherwise send immediately
-  return new Date();
+
+  const sgMessageId = resp.headers.get("x-message-id") || null;
+  return { ok: true, sgMessageId };
+}
+
+async function updateQueueRow(id, patch) {
+  // We update defensively (only columns that likely exist).
+  const tryPatch = {
+    ...patch,
+    updated_at: nowIso(),
+  };
+
+  // attempt update; if it fails due to missing column(s), retry with smaller patch
+  const { error } = await supabaseAdmin.from("automation_email_queue").update(tryPatch).eq("id", id);
+  if (!error) return;
+
+  const msg = String(error.message || "");
+  // retry minimal update
+  const minimal = { status: patch.status, updated_at: nowIso() };
+  const { error: e2 } = await supabaseAdmin.from("automation_email_queue").update(minimal).eq("id", id);
+  if (e2) throw new Error(msg);
 }
 
 export default async function handler(req, res) {
@@ -68,188 +166,102 @@ export default async function handler(req, res) {
       return res.status(401).json({ ok: false, error: "Unauthorized" });
     }
 
-    if (!SENDGRID_KEY) {
-      return res.status(500).json({
-        ok: false,
-        error: "SendGrid API key not configured",
-      });
-    }
+    const max = Math.min(Number(req.body?.max || 100), 500);
 
-    sgMail.setApiKey(SENDGRID_KEY);
-
-    const maxEmails = Number(req.body?.max || 100);
-
-    // Fetch pending emails from queue
-    const { data: queuedEmails, error: fetchErr } = await supabaseAdmin
+    const { data: queued, error } = await supabaseAdmin
       .from("automation_email_queue")
       .select("*")
-      .in("status", ["pending", "queued"])
-      .limit(maxEmails);
+      .eq("status", "queued")
+      .order("created_at", { ascending: true })
+      .limit(max);
 
-    if (fetchErr) {
-      console.error("Fetch error:", fetchErr);
-      return res.status(500).json({
-        ok: false,
-        error: "Failed to fetch queued emails: " + fetchErr.message,
-      });
-    }
-
-    const emails = Array.isArray(queuedEmails) ? queuedEmails : [];
-    console.log(`[send-emails] Found ${emails.length} emails ready to send`);
-
-    if (emails.length === 0) {
-      return res.json({
-        ok: true,
-        processed: 0,
-        sent: 0,
-        failed: 0,
-        message: "No emails ready to send",
-      });
-    }
+    if (error) return res.status(500).json({ ok: false, error: error.message });
 
     let sent = 0;
     let failed = 0;
-    const failedIds = [];
 
-    for (const email of emails) {
+    // cache flows per flow_id
+    const flowCache = new Map();
+
+    for (const row of queued || []) {
       try {
-        // Load HTML from storage if needed
-        let htmlContent = email.html_content || "";
+        const flow_id = row.flow_id;
+        const lead_id = row.lead_id;
+        const node_id = row.node_id;
 
-        if (!htmlContent && email.html_path) {
-          const bucket = email.bucket || "email-user-assets";
-          htmlContent = await loadHtmlFromStorage(bucket, email.html_path);
+        if (!flow_id || !lead_id || !node_id) {
+          await updateQueueRow(row.id, { status: "failed", error: "Missing flow_id/lead_id/node_id" });
+          failed += 1;
+          continue;
         }
 
-        // Decode base64 if needed
-        if (htmlContent.startsWith("base64:")) {
-          htmlContent = Buffer.from(htmlContent.slice(7), "base64").toString("utf8");
-        } else if (
-          email.html_content &&
-          typeof email.html_content === "string" &&
-          /^[A-Za-z0-9+/=]+$/.test(email.html_content) &&
-          email.html_content.length > 100
-        ) {
-          try {
-            const decoded = Buffer.from(email.html_content, "base64").toString("utf8");
-            if (decoded.includes("<") || decoded.includes("html")) {
-              htmlContent = decoded;
-            }
-          } catch {
-            // Keep original
-          }
+        let flow = flowCache.get(String(flow_id));
+        if (!flow) {
+          flow = await loadFlow(flow_id);
+          flowCache.set(String(flow_id), flow);
         }
 
-        if (!htmlContent) {
-          throw new Error("No HTML content available");
+        const node = findNode(flow, node_id);
+        if (!node) {
+          await updateQueueRow(row.id, { status: "failed", error: `Node not found: ${node_id}` });
+          failed += 1;
+          continue;
         }
 
-        let sendRowId = null;
-        try {
-          const sendRow = {
-            user_id: email.user_id || null,
-            email: email.to_email,
-            recipient_email: email.to_email,
-            variant: email.node_id || email.variant || null,
-            subject: email.subject || null,
-            email_type: "automation",
-            status: "queued",
-            sent_at: null,
-          };
+        const d = node.data || {};
+        const subject = d.subject || d.title || d.label || "Hello";
+        const html = d.html || d.emailHtml || d.bodyHtml || null;
 
-          const { data: sendRowData, error: sendRowErr } = await supabaseAdmin
-            .from("email_sends")
-            .insert(sendRow)
-            .select("id")
-            .single();
+        const templateId =
+          d.sendgrid_template_id ||
+          d.template_id ||
+          d.email_template_id ||
+          d.templateId ||
+          null;
 
-          if (!sendRowErr && sendRowData?.id) {
-            sendRowId = sendRowData.id;
-          }
-        } catch {
-          // don't block sending if logging fails
-        }
+        const lead = await loadLead(lead_id);
 
-        const msg = {
-          to: email.to_email,
-          from: process.env.SENDGRID_FROM_EMAIL || "noreply@gr8result.com",
-          replyTo: process.env.DEFAULT_REPLY_EMAIL || undefined,
-          subject: email.subject || "Message",
-          html: htmlContent,
-          customArgs: {
-            gr8_send_row_id: sendRowId || undefined,
-            source: "automation",
-            flow_id: email.flow_id || undefined,
-            node_id: email.node_id || undefined,
-            lead_id: email.lead_id || undefined,
+        const out = await sendSendGrid({
+          toEmail: lead.email,
+          toName: lead.name || "",
+          fromEmail: DEFAULT_FROM_EMAIL,
+          fromName: DEFAULT_FROM_NAME,
+          subject,
+          html,
+          templateId,
+          dynamicData: {
+            lead_name: lead.name || "",
+            lead_email: lead.email || "",
+            lead_phone: lead.phone || "",
+            ...(d.dynamic_template_data || {}),
           },
-        };
+        });
 
-        await sgMail.send(msg);
+        await updateQueueRow(row.id, {
+          status: "sent",
+          sent_at: nowIso(),
+          sendgrid_message_id: out.sgMessageId || null,
+        });
 
-        // Mark as sent
-        await supabaseAdmin
-          .from("automation_email_queue")
-          .update({
-            status: "sent",
-            sent_at: new Date().toISOString(),
-          })
-          .eq("id", email.id);
-
-        if (sendRowId) {
-          await supabaseAdmin
-            .from("email_sends")
-            .update({
-              status: "sent",
-              sent_at: new Date().toISOString(),
-            })
-            .eq("id", sendRowId)
-            .catch(() => {});
-        }
-
-        sent++;
-        console.log(`[send-emails] Email sent: ${email.id} to ${email.to_email}`);
-      } catch (err) {
-        console.error(`[send-emails] Failed to send email ${email.id}:`, err.message);
-        failedIds.push(email.id);
-        failed++;
-
-        // Update with error
-        await supabaseAdmin
-          .from("automation_email_queue")
-          .update({
+        sent += 1;
+      } catch (e) {
+        failed += 1;
+        try {
+          await updateQueueRow(row.id, {
             status: "failed",
-            last_error: err.message,
-          })
-          .eq("id", email.id)
-          .catch(() => {}); // Don't fail if update fails
-
-        if (sendRowId) {
-          await supabaseAdmin
-            .from("email_sends")
-            .update({
-              status: "failed",
-              error_message: err.message,
-            })
-            .eq("id", sendRowId)
-            .catch(() => {});
-        }
+            error: String(e?.message || e).slice(0, 800),
+          });
+        } catch {}
       }
     }
 
     return res.json({
       ok: true,
-      processed: emails.length,
+      processed: queued?.length || 0,
       sent,
       failed,
-      failed_ids: failedIds,
-      message: `Processed ${emails.length} queued emails: ${sent} sent, ${failed} failed`,
     });
-  } catch (err) {
-    console.error("[send-emails] Handler error:", err);
-    return res.status(500).json({
-      ok: false,
-      error: err?.message || String(err),
-    });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: e?.message || String(e) });
   }
 }

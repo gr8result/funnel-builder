@@ -73,6 +73,12 @@ export default async function handler(req, res) {
     const lead_id = pickLeadId(body);
     const msg = pickMessage(body);
     const directTo = pickTo(body);
+    // Accept origin from request, fallback to user_id
+    const requestedOrigin = s(body?.origin);
+    // Only allow if origin matches the logged-in user_id
+    const origin = (requestedOrigin && requestedOrigin === user_id)
+      ? requestedOrigin
+      : user_id;
 
     if (!msg) return res.status(400).json({ ok: false, error: "Missing message/body" });
 
@@ -106,7 +112,7 @@ export default async function handler(req, res) {
     const result = await sendSmsGlobal({
       toPhone,
       message: msg,
-      origin: process.env.DEFAULT_SMS_ORIGIN,
+      origin,
     });
 
     if (!result.ok) {

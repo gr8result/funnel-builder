@@ -18,6 +18,7 @@ import {
   Pie,
   Cell,
 } from "recharts";
+import ReportBanner from "../../../../../components/ui/ReportBanner";
 
 const RANGE_TO_DAYS = { today: 0, d7: 7, d30: 30, d90: 90, all: null };
 const PIE_COLORS = ["#22c55e", "#3b82f6", "#facc15", "#ef4444", "#94a3b8"];

@@ -1,20 +1,9 @@
-// ============================================
-// /pages/modules/email/reports/broadcasts/index.js
-// ============================================
-// FULL REPLACEMENT — BROADCAST REPORT WITH REAL NAMES + DELIVERY + LINE/PIE
-// + DEMO MODE (dummy data) so you can see a full working report.
-//
-// How to enable demo data:
-//   1) Add ?demo=1 to the URL
-//      /modules/email/reports/broadcasts?demo=1
-//   2) Or click "Use demo data" button on the page
-//
-// Demo data ONLY shows when enabled OR when Supabase returns no rows.
+// pages/modules/email/reports/broadcasts/index.js
+// Broadcast report — reads from email_sends only, no demo/test logic.
 
 import Head from "next/head";
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
-import { useRouter } from "next/router";
 import { supabase } from "../../../../../utils/supabase-client";
 import {
   ResponsiveContainer,
@@ -28,10 +17,10 @@ import {
   Pie,
   Cell,
 } from "recharts";
+import ReportBanner from "../../../../../components/ui/ReportBanner";
 
 const RANGE_TO_DAYS = { today: 0, d7: 7, d30: 30, d90: 90, all: null };
 const PIE_COLORS = ["#22c55e", "#3b82f6", "#facc15", "#ef4444", "#a855f7", "#94a3b8"];
-const LS_DEMO_KEY = "gr8:emailReports:broadcasts:demo";
 
 function startOfToday() {
   const d = new Date();
@@ -52,12 +41,6 @@ function addDays(d, n) {
   x.setDate(x.getDate() + n);
   return x;
 }
-function clampInt(v, min, max) {
-  const n = Number(v);
-  if (!Number.isFinite(n)) return min;
-  return Math.max(min, Math.min(max, Math.floor(n)));
-}
-
 function normalizeStatus(r) {
   const st = String(r.status || "").toLowerCase();
   const le = String(r.last_event || "").toLowerCase();
@@ -69,160 +52,7 @@ function normalizeStatus(r) {
   return st || "sent";
 }
 
-function buildAxis(range, rows) {
-  let start;
-  if (range === "all") {
-    start = rows.length ? new Date(rows.reduce((min, r) => {
-      const t = new Date(r.created_at).getTime();
-      return t < min ? t : min;
-    }, Date.now())) : startOfToday();
-  } else {
-    start = new Date(isoDaysAgo(RANGE_TO_DAYS[range]));
-  }
-  start.setHours(0, 0, 0, 0);
-
-  const end = startOfToday();
-  const out = [];
-  let cur = new Date(start);
-  while (cur <= end) {
-    out.push(ymd(cur));
-    cur = addDays(cur, 1);
-  }
-  return out;
-}
-
-function makeDemoDataset(range) {
-  const now = new Date();
-  const days = range === "today" ? 1 : range === "d7" ? 7 : range === "d30" ? 30 : range === "d90" ? 90 : 30;
-
-  const broadcastNames = [
-    "Welcome to GR8 (Blueprint)",
-    "December Promo – 20% Off",
-    "New Feature: CRM Calls + SMS",
-    "Weekly Tips – Marketing Boost",
-    "Re-engagement: We Miss You",
-  ];
-  const broadcastIds = broadcastNames.map((_, i) => `demo-broadcast-${i + 1}`);
-
-  const emailPool = [
-    "grant.rohde63@gmail.com",
-    "support@waiteandsea.com.au",
-    "support@elaninteriors.com.au",
-    "support@gr8result.com",
-    "hello@example.com",
-    "client1@example.com",
-    "client2@example.com",
-    "client3@example.com",
-    "client4@example.com",
-    "client5@example.com",
-  ];
-
-  // deterministic-ish seed from date
-  const seed = Number(String(now.getFullYear()) + String(now.getMonth() + 1).padStart(2, "0") + String(now.getDate()).padStart(2, "0"));
-  function rand(n) {
-    // simple LCG
-    const x = (Math.sin(seed + n * 9973) + 1) * 100000;
-    return x - Math.floor(x);
-  }
-
-  const rows = [];
-  let idCounter = 1;
-
-  const start = range === "today"
-    ? startOfToday()
-    : addDays(startOfToday(), -(days - 1));
-
-  for (let di = 0; di < days; di++) {
-    const day = addDays(start, di);
-
-    // simulate varying volume
-    const baseVol = range === "today" ? 35 : 18;
-    const wave = Math.round((Math.sin((di / Math.max(1, days - 1)) * Math.PI * 2) + 1) * 8);
-    const sentCount = clampInt(baseVol + wave + Math.round(rand(di + 1) * 10), 8, 60);
-
-    for (let si = 0; si < sentCount; si++) {
-      const bIdx = clampInt(rand(di * 1000 + si) * broadcastIds.length, 0, broadcastIds.length - 1);
-      const email = emailPool[clampInt(rand(di * 2000 + si) * emailPool.length, 0, emailPool.length - 1)];
-
-      const createdAt = new Date(day);
-      createdAt.setHours(clampInt(rand(si + di + 9) * 23, 0, 23), clampInt(rand(si + 33) * 59, 0, 59), clampInt(rand(si + 77) * 59, 0, 59), 0);
-
-      // delivery/open/click/unsub probabilities
-      const deliveredP = 0.92;
-      const openP = 0.38;
-      const clickP = 0.11;
-      const unsubP = 0.01;
-      const bounceP = 1 - deliveredP;
-
-      const roll = rand(di * 3000 + si * 7 + 123);
-
-      let status = "sent";
-      let last_event = "processed";
-      let open_count = 0;
-      let click_count = 0;
-      let unsubscribed = false;
-      let bounced_at = null;
-
-      if (roll < bounceP) {
-        status = "bounced";
-        last_event = "bounce";
-        bounced_at = new Date(createdAt.getTime() + 1000 * 60 * clampInt(rand(si + 44) * 30, 1, 30)).toISOString();
-      } else {
-        status = "delivered";
-        last_event = "delivered";
-      }
-
-      // opens/clicks only if not bounced
-      if (status !== "bounced") {
-        const r2 = rand(di * 5000 + si * 13 + 555);
-        if (r2 < openP) {
-          const times = 1 + clampInt(rand(si + 88) * 3, 0, 2);
-          open_count = times;
-          status = "opened";
-          last_event = "open";
-        }
-        const r3 = rand(di * 7000 + si * 17 + 777);
-        if (r3 < clickP) {
-          const times = 1 + clampInt(rand(si + 99) * 2, 0, 1);
-          click_count = times;
-          status = "clicked";
-          last_event = "click";
-        }
-        const r4 = rand(di * 9000 + si * 19 + 999);
-        if (r4 < unsubP) {
-          unsubscribed = true;
-          status = "unsubscribe";
-          last_event = "unsubscribe";
-        }
-      }
-
-      const last_event_at = new Date(createdAt.getTime() + 1000 * 60 * clampInt(rand(si + 222) * 120, 1, 120)).toISOString();
-
-      rows.push({
-        id: `demo-send-${idCounter++}`,
-        user_id: "demo-user",
-        email,
-        broadcast_id: broadcastIds[bIdx],
-        status,
-        last_event,
-        open_count,
-        click_count,
-        unsubscribed,
-        bounced_at,
-        created_at: createdAt.toISOString(),
-        last_event_at,
-      });
-    }
-  }
-
-  const nameMap = {};
-  broadcastIds.forEach((id, i) => (nameMap[id] = broadcastNames[i]));
-
-  return { rows, nameMap };
-}
-
-export default function BroadcastsReport() {
-  const router = useRouter();
+function BroadcastsReport() {
   const [range, setRange] = useState("today");
   const [chartMode, setChartMode] = useState("line");
   const [rows, setRows] = useState([]);
@@ -230,94 +60,54 @@ export default function BroadcastsReport() {
   const [userId, setUserId] = useState(null);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState(null);
-  const [demo, setDemo] = useState(false);
 
   const fromIso = useMemo(() => isoDaysAgo(RANGE_TO_DAYS[range]), [range]);
 
   useEffect(() => {
-    // demo flag from query OR localStorage
-    const qDemo = String(router?.query?.demo || "").toLowerCase();
-    const demoFromQuery = qDemo === "1" || qDemo === "true" || qDemo === "yes" || qDemo === "on";
-    let demoFromLS = false;
-    try {
-      demoFromLS = localStorage.getItem(LS_DEMO_KEY) === "1";
-    } catch {}
-    setDemo(Boolean(demoFromQuery || demoFromLS));
-  }, [router?.query?.demo]);
-
-  useEffect(() => {
     let mounted = true;
-
     async function run() {
       setLoading(true);
       setErr(null);
-
       try {
-        // If demo is enabled, load demo immediately (no Supabase dependency)
-        if (demo) {
-          const { rows: dRows, nameMap: dMap } = makeDemoDataset(range);
-          if (!mounted) return;
-          setUserId("demo-user");
-          setRows(dRows.map((r) => ({ ...r, status: normalizeStatus(r) })));
-          setNameMap(dMap);
-          setLoading(false);
-          return;
-        }
-
         const { data: auth } = await supabase.auth.getUser();
         const uid = auth?.user?.id || null;
         if (!mounted) return;
         setUserId(uid);
-
         if (!uid) {
           setRows([]);
           setNameMap({});
           setLoading(false);
           return;
         }
-
         let q = supabase
           .from("email_sends")
           .select(
-            "id,email,status,last_event,open_count,click_count,unsubscribed,bounced_at,created_at,last_event_at,broadcast_id"
+            "id, email, recipient_email, status, last_event, open_count, click_count, unsubscribed, bounced_at, created_at, last_event_at, broadcast_id, sg_message_id"
           )
           .eq("user_id", uid)
           .not("broadcast_id", "is", null)
           .order("created_at", { ascending: true })
           .limit(10000);
-
         if (fromIso) q = q.gte("created_at", fromIso);
-
         const { data, error } = await q;
         if (error) throw error;
-
-        const cleaned = (data || []).map((r) => ({
-          ...r,
-          status: normalizeStatus(r),
-        }));
-
-        // If no rows came back, auto-show demo so you can see the layout
-        if (!cleaned.length) {
-          const { rows: dRows, nameMap: dMap } = makeDemoDataset(range);
-          if (!mounted) return;
-          setRows(dRows.map((r) => ({ ...r, status: normalizeStatus(r) })));
-          setNameMap(dMap);
-          setLoading(false);
-          return;
-        }
-
+        const cleaned = (data || []).map((r) => {
+          const email = r.email || r.recipient_email || r.recipient || null;
+          return {
+            ...r,
+            email,
+            status: normalizeStatus(r),
+          };
+        });
         if (!mounted) return;
         setRows(cleaned);
-
         const ids = Array.from(new Set(cleaned.map((r) => r.broadcast_id).filter(Boolean))).slice(0, 500);
-
         if (ids.length) {
           const { data: bcasts, error: bErr } = await supabase
             .from("email_broadcasts")
             .select("id, name, title, subject")
             .in("id", ids)
             .limit(500);
-
           if (!bErr && bcasts) {
             const m = {};
             for (const b of bcasts) m[b.id] = b.name || b.title || b.subject || "Broadcast";
@@ -328,7 +118,6 @@ export default function BroadcastsReport() {
         } else {
           setNameMap({});
         }
-
         setLoading(false);
       } catch (e) {
         if (!mounted) return;
@@ -336,10 +125,9 @@ export default function BroadcastsReport() {
         setLoading(false);
       }
     }
-
     run();
     return () => (mounted = false);
-  }, [fromIso, demo, range]);
+  }, [fromIso, range]);
 
   const metrics = useMemo(() => {
     const sent = rows.length;
@@ -351,13 +139,36 @@ export default function BroadcastsReport() {
     return { sent, delivered, opened, clicked, bounced, unsub };
   }, [rows]);
 
+  // Build chart data
+  function buildAxis(range, rows) {
+    let start;
+    if (range === "all") {
+      start = rows.length
+        ? new Date(rows.reduce((min, r) => {
+            const t = new Date(r.created_at).getTime();
+            return t < min ? t : min;
+          }, Date.now()))
+        : startOfToday();
+    } else {
+      start = new Date(isoDaysAgo(RANGE_TO_DAYS[range]));
+    }
+    start.setHours(0, 0, 0, 0);
+    const end = startOfToday();
+    const out = [];
+    let cur = new Date(start);
+    while (cur <= end) {
+      out.push(ymd(cur));
+      cur = addDays(cur, 1);
+    }
+    return out;
+  }
+
   const chartData = useMemo(() => {
     const axis = buildAxis(range, rows);
     const map = {};
     axis.forEach((d) => {
       map[d] = { date: d, sent: 0, delivered: 0, opened: 0, clicked: 0, bounced: 0, unsub: 0 };
     });
-
     rows.forEach((r) => {
       const d = ymd(r.created_at);
       if (!map[d]) return;
@@ -368,7 +179,6 @@ export default function BroadcastsReport() {
       if (String(r.status || "").toLowerCase() === "bounced") map[d].bounced++;
       if (r.unsubscribed || String(r.status || "").toLowerCase() === "unsubscribe") map[d].unsub++;
     });
-
     return axis.map((d) => map[d]);
   }, [rows, range]);
 
@@ -390,27 +200,23 @@ export default function BroadcastsReport() {
     [rows]
   );
 
-  function setDemoPersist(v) {
-    try {
-      localStorage.setItem(LS_DEMO_KEY, v ? "1" : "0");
-    } catch {}
-    setDemo(!!v);
-  }
-
   return (
     <>
       <Head><title>Broadcast analytics</title></Head>
-
       <div style={styles.page}>
-        <div style={styles.container}>
-          <div style={{ ...styles.banner, background: "#facc15" }}>
-            <div>
-              <div style={styles.bannerTitle}>Broadcasts</div>
-              <div style={styles.bannerSub}>Delivery, opens, clicks & unsubscribes</div>
+        <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 24 }}>
+          <div style={{ width: 1320, maxWidth: '100%', display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: '#f59e0b', borderRadius: 18, padding: '20px 24px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 18 }}>
+              <div style={{ width: 48, height: 48, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 48 }}>📢</div>
+              <div>
+                <div style={{ fontSize: 48, fontWeight: 500, color: '#ffffff', margin: 0 }}>Broadcasts</div>
+                <div style={{ fontSize: 18, color: '#ffffff', opacity: 1, margin: '4px 0 0 0' }}>Delivery, opens, clicks & unsubscribes</div>
+              </div>
             </div>
-            <Link href="/modules/email/reports" style={styles.backBtn}>← Back</Link>
+            <Link href="/modules/email/reports" style={{ background: '#000000', color: '#ffffff', padding: '10px 16px', borderRadius: 999, textDecoration: 'none', fontWeight: 500, border: 'none', fontSize: 18 }}>← Back</Link>
           </div>
-
+        </div>
+        <div style={styles.container}>
           <div style={styles.rangeRow}>
             <RangePill label="Today" active={range === "today"} onClick={() => setRange("today")} />
             <RangePill label="Last 7 days" active={range === "d7"} onClick={() => setRange("d7")} />
@@ -418,37 +224,20 @@ export default function BroadcastsReport() {
             <RangePill label="Last 90 days" active={range === "d90"} onClick={() => setRange("d90")} />
             <RangePill label="All time" active={range === "all"} onClick={() => setRange("all")} />
             <div style={{ flex: 1 }} />
-
-            <button
-              style={styles.toggleBtn}
-              onClick={() => setChartMode(chartMode === "line" ? "pie" : "line")}
-            >
-              {chartMode === "line" ? "View pie chart" : "View line graph"}
-            </button>
-
-            <button
-              style={{ ...styles.toggleBtn, ...(demo ? styles.toggleBtnOn : null) }}
-              onClick={() => setDemoPersist(!demo)}
-              title="For previewing the UI with fake data"
-            >
-              {demo ? "Demo data ON" : "Use demo data"}
-            </button>
+            <button style={styles.toggleBtn} onClick={() => setChartMode(chartMode === "line" ? "pie" : "line")}>{chartMode === "line" ? "View pie chart" : "View line graph"}</button>
           </div>
-
-          {loading ? <div style={styles.note}>Loading…</div> : null}
-          {!loading && !userId ? <div style={styles.note}>You must be logged in to view analytics.</div> : null}
-          {!loading && err ? <div style={{ ...styles.note, border: "1px solid #ef4444" }}>{err}</div> : null}
-
-          {!loading && userId && !err ? (
+          {loading && <div style={styles.note}>Loading…</div>}
+          {err && <div style={{ ...styles.note, border: "1px solid #ef4444" }}>{err}</div>}
+          {!loading && !err && (
             <>
               <div style={styles.metricsGrid}>
                 <Metric title="Sent" value={metrics.sent} />
                 <Metric title="Delivered" value={metrics.delivered} />
                 <Metric title="Opened" value={metrics.opened} />
                 <Metric title="Clicked" value={metrics.clicked} />
+                <Metric title="Bounced" value={metrics.bounced} />
                 <Metric title="Unsubscribed" value={metrics.unsub} />
               </div>
-
               <div style={styles.chartWrap}>
                 {chartMode === "line" ? (
                   <ResponsiveContainer width="100%" height={320}>
@@ -479,7 +268,6 @@ export default function BroadcastsReport() {
                   </ResponsiveContainer>
                 )}
               </div>
-
               <div style={styles.tableWrap}>
                 <div style={styles.tableHeadRow}>
                   <div style={styles.th}>When</div>
@@ -491,23 +279,21 @@ export default function BroadcastsReport() {
                   <div style={styles.th}>Unsub</div>
                   <div style={styles.th}>Status</div>
                 </div>
-
                 {recent.length === 0 ? (
-                  <div style={styles.tableEmpty}>No broadcast rows found.</div>
+                  <div style={styles.tableEmpty}>No broadcast rows found for this period.</div>
                 ) : (
                   recent.map((r) => {
                     const when = r.last_event_at || r.created_at;
                     const deliveredYes = ["delivered", "opened", "clicked"].includes(String(r.status || "").toLowerCase());
                     const bName = nameMap[r.broadcast_id] || "Broadcast";
-
                     return (
                       <div key={r.id} style={styles.tr}>
                         <div style={styles.td}>{when ? new Date(when).toLocaleString() : "—"}</div>
                         <div style={styles.td}>{r.email || "—"}</div>
                         <div style={styles.td} title={bName}>{bName}</div>
-                        <div style={styles.td}>{deliveredYes ? "Yes" : "—"}</div>
-                        <div style={styles.td}>{Number(r.open_count || 0)}</div>
-                        <div style={styles.td}>{Number(r.click_count || 0)}</div>
+                        <div style={styles.td}>{deliveredYes ? "✓" : "—"}</div>
+                        <div style={styles.td}>{Number(r.open_count || 0) > 0 ? "✓" : "—"}</div>
+                        <div style={styles.td}>{Number(r.click_count || 0) > 0 ? "✓" : "—"}</div>
                         <div style={styles.td}>{r.unsubscribed || String(r.status || "").toLowerCase() === "unsubscribe" ? "Yes" : "—"}</div>
                         <div style={styles.td}>{String(r.status || "—")}</div>
                       </div>
@@ -516,7 +302,7 @@ export default function BroadcastsReport() {
                 )}
               </div>
             </>
-          ) : null}
+          )}
         </div>
       </div>
     </>
@@ -561,15 +347,15 @@ const styles = {
     boxShadow: "0 18px 40px rgba(0,0,0,0.45)",
     border: "1px solid rgba(255,255,255,0.10)",
   },
-  bannerTitle: { fontSize: 34, fontWeight: 600, color: "#241a00", lineHeight: 1.05 },
-  bannerSub: { fontSize: 16, marginTop: 3, color: "rgba(36,26,0,0.80)" },
+  bannerTitle: { fontSize: 48, fontWeight: 600, color: "#ffffff", lineHeight: 1.05 },
+  bannerSub: { fontSize: 18, marginTop: 3, color: "ffffff" },
 
   backBtn: {
-    background: "rgba(2,6,23,0.75)",
+    background: "rgba(0, 0, 0, 0.75)",
     color: "#e6eef8",
     borderRadius: 999,
     padding: "10px 16px",
-    fontSize: 16,
+    fontSize: 18,
     textDecoration: "none",
     border: "1px solid rgba(255,255,255,0.18)",
     fontWeight: 600,
@@ -643,5 +429,6 @@ const styles = {
     borderTop: "1px solid rgba(255,255,255,0.08)",
   },
   td: { fontSize: 16, opacity: 0.92, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
-  tableEmpty: { padding: 12, fontSize: 16, opacity: 0.85, background: "rgba(2,6,23,0.45)" },
-};
+  tableEmpty: { padding: 12, fontSize: 16, opacity: 0.85, background: "rgba(2,6,23,0.45)" }
+}
+export default BroadcastsReport;

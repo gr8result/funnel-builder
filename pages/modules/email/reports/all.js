@@ -83,7 +83,7 @@ function normalizeStatus(r) {
 
 function guessType(r) {
   if (r.broadcast_id) return "Broadcast";
-  if (r.campaigns_id) return "campaigns";
+    if (r.campaign_id) return "Campaign";
   if (r.automation_id) return "Automation";
   if (r.autoresponder_id) return "Autoresponder";
   return "—";
@@ -120,7 +120,7 @@ export default function AllEmailReport() {
         let q = supabase
           .from("email_sends")
           .select(
-            "id,email,status,last_event,open_count,click_count,unsubscribed,bounced_at,created_at,last_event_at,broadcast_id,campaigns_id,automation_id,autoresponder_id"
+            "id,email,status,last_event,open_count,click_count,unsubscribed,bounced_at,created_at,last_event_at,broadcast_id,campaign_id,automation_id,autoresponder_id"
           )
           .eq("user_id", uid)
           .order("created_at", { ascending: true })
@@ -199,12 +199,13 @@ export default function AllEmailReport() {
       <Head><title>All email analytics</title></Head>
       <div style={styles.page}>
         <div style={styles.container}>
-          <div style={{ ...styles.banner, background: "#10b981" }}>
+          <div style={{ ...styles.banner, background: "#10b981", display: "flex", alignItems: "center", gap: 18 }}>
+            <span style={{ fontSize: 48, marginRight: 12 }}>📊</span>
             <div>
               <div style={styles.bannerTitle}>All email types (Total)</div>
-              <div style={styles.bannerSub}>Live data from <code>email_sends</code></div>
+              <div style={styles.bannerSub}>Live data from all locations</div>
             </div>
-            <Link href="/modules/email/reports" style={styles.backBtn}>← Back</Link>
+            <Link href="/modules/email/reports" style={{ ...styles.backBtn, background: "#fffbe8", color: "#241a00", borderRadius: 999, padding: "12px 22px", fontSize: 18, textDecoration: "none", border: "1px solid #10b981", fontWeight: 600, boxShadow: "0 2px 8px rgba(0,0,0,0.08)", marginLeft: "auto" }}>← Back</Link>
           </div>
 
           <div style={styles.rangeRow}>
@@ -309,8 +310,9 @@ const styles = {
   page:{minHeight:"100vh",background:"radial-gradient(circle at top,#0f172a 0%,#020617 55%)",padding:"30px 20px",color:"#e6eef8",fontSize:16},
   container:{maxWidth:1320,margin:"0 auto"},
   banner:{borderRadius:18,padding:"16px 18px",display:"flex",justifyContent:"space-between",alignItems:"center"},
-  bannerTitle:{fontSize:34,fontWeight:600,color:"#052b1b"},
-  bannerSub:{fontSize:16},
+
+  bannerTitle:{fontSize:48,fontWeight:600,color:"#052b1b"},
+  bannerSub:{fontSize:18},
   backBtn:{fontSize:16},
   rangeRow:{marginTop:12,display:"flex",gap:8,flexWrap:"wrap"},
   rangePill:{padding:"7px 12px",fontSize:16},

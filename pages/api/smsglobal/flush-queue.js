@@ -1,34 +1,3 @@
-// /pages/api/smsglobal/flush-queue.js
-// FULL REPLACEMENT
-//
-// ✅ Option B (recommended): CRON key access for server/cron/browser calls
-//    GET /api/smsglobal/flush-queue?key=<CRON_SECRET>&limit=50
-//
-// ✅ Option A (still supported): Bearer token access
-//    POST /api/smsglobal/flush-queue?limit=50
-//    Authorization: Bearer <SUPABASE_ACCESS_TOKEN>
-//
-// ✅ Sends queued sms_queue rows via SMSGlobal
-// ✅ Updates: status + sent_at + provider_message_id/provider_id + last_error/error
-// ✅ Handles your schema: scheduled_for + available_at + provider_message_id + last_error
-// ✅ Works with integer sms_queue.id
-// ✅ Uses shared sendSmsGlobal from lib/smsglobal/index.js for proper MAC auth
-//
-// Query params:
-//   limit=50 (default 25, max 200)
-//   dry=1    (no sends, just reports due rows)
-//
-// ENV required:
-//   NEXT_PUBLIC_SUPABASE_URL (or SUPABASE_URL)
-//   NEXT_PUBLIC_SUPABASE_ANON_KEY (or SUPABASE_ANON_KEY)
-//   SUPABASE_SERVICE_ROLE_KEY (or SUPABASE_SERVICE_ROLE / SUPABASE_SERVICE_KEY / SUPABASE_SERVICE)
-//
-//   SMSGLOBAL_API_KEY
-//   SMSGLOBAL_API_SECRET
-//   DEFAULT_SMS_ORIGIN (optional)
-//   SMSGLOBAL_ALLOWED_ORIGINS (optional comma list)
-//   CRON_SECRET (or AUTOMATION_CRON_KEY)  <-- Option B key
-
 import { createClient } from "@supabase/supabase-js";
 import { sendSmsGlobal } from "../../../lib/smsglobal/index.js";
 
@@ -83,7 +52,10 @@ function normalizePhone(raw) {
   return v;
 }
 
-function pickOrigin() {
+function pickOrigin(rowOrigin) {
+  // Prefer the row value
+  if (s(rowOrigin)) return s(rowOrigin);
+  // Then any allowed from env, then default
   if (SMSGLOBAL_ALLOWED_ORIGINS.length) {
     if (SMSGLOBAL_ALLOWED_ORIGINS.includes(DEFAULT_SMS_ORIGIN)) return DEFAULT_SMS_ORIGIN;
     return SMSGLOBAL_ALLOWED_ORIGINS[0];
@@ -97,9 +69,9 @@ function parseTime(v) {
   return Number.isFinite(t) ? t : NaN;
 }
 
-function isDueNow(row, nowMs) {
-  // includes YOUR scheduled_for
-  const candidates = [
+function getEarliestScheduledTime(row) {
+  // Use all possible scheduling fields, prefer earliest
+  const times = [
     row?.scheduled_for,
     row?.scheduled_at,
     row?.available_at,
@@ -108,9 +80,13 @@ function isDueNow(row, nowMs) {
   ]
     .map(parseTime)
     .filter((t) => Number.isFinite(t));
+  if (!times.length) return 0; // No schedule means due now!
+  return Math.min(...times);
+}
 
-  if (!candidates.length) return true;
-  return Math.min(...candidates) <= nowMs;
+function isDueNow(row, nowMs) {
+  // Only due if earliest schedule date/time is in the past or now
+  return getEarliestScheduledTime(row) <= nowMs;
 }
 
 function getRowToPhone(row) {
@@ -128,7 +104,7 @@ function getRowMessage(row) {
 }
 
 function getRowId(row) {
-  return row?.id; // integer in your table
+  return row?.id;
 }
 
 async function updateRow(supabaseAdmin, id, patch) {
@@ -170,7 +146,6 @@ function hasValidKey(req) {
 }
 
 export default async function handler(req, res) {
-  // Allow GET (cron/browser) + POST (api client)
   if (req.method !== "GET" && req.method !== "POST") {
     res.setHeader("Allow", "GET, POST");
     return json(res, 405, { ok: false, error: "Method not allowed" });
@@ -238,9 +213,9 @@ export default async function handler(req, res) {
     return !st || st === "queued" || st === "pending" || st === "ready";
   });
 
+  // Only send messages that are due now or earlier
   const due = pending.filter((r) => isDueNow(r, nowMs)).slice(0, limit);
 
-  // Fast report for dry mode
   if (dry) {
     return json(res, 200, {
       ok: true,
@@ -264,6 +239,7 @@ export default async function handler(req, res) {
     const id = getRowId(row);
     const to = getRowToPhone(row);
     const message = getRowMessage(row);
+    const origin = pickOrigin(row?.origin);
 
     if (!id || !to || !message) {
       failed++;
@@ -271,15 +247,21 @@ export default async function handler(req, res) {
       continue;
     }
 
-    // mark sending
     await updateRow(supabaseAdmin, id, { status: "sending", last_error: null, error: null });
 
     try {
       const out = await sendSmsGlobal({
         toPhone: to,
         message,
-        origin: s(row?.origin) || pickOrigin(),
+        origin,
       });
+
+      // Extract provider_id from response body
+      const provider_id =
+        (Array.isArray(out.body?.messages) && out.body.messages[0]?.id) ||
+        out.body?.messageId ||
+        out.body?.id ||
+        "";
 
       if (!out.ok) {
         failed++;
@@ -289,6 +271,23 @@ export default async function handler(req, res) {
           last_error: `SMSGlobal HTTP ${out.http}`,
           error: JSON.stringify(out.body || {}),
           smsglobal_http: out.http,
+        });
+
+        // Log failed send to sms_sends
+        await supabaseAdmin.from("sms_sends").insert({
+          user_id: row.user_id || null,
+          queue_id: id,
+          phone: to,
+          message,
+          origin,
+          status: "failed",
+          sent_at: null,
+          failed_at: nowIso,
+          provider_id: provider_id || null,
+          delivery_status: "failed",
+          last_error: `SMSGlobal HTTP ${out.http}`,
+          error_message: JSON.stringify(out.body || {}),
+          created_at: nowIso,
         });
 
         results.push({
@@ -303,13 +302,6 @@ export default async function handler(req, res) {
 
       sent++;
 
-      // Extract provider_id from response body
-      const provider_id = 
-        (Array.isArray(out.body?.messages) && out.body.messages[0]?.id) ||
-        out.body?.messageId ||
-        out.body?.id ||
-        "";
-
       await updateRow(supabaseAdmin, id, {
         status: "sent",
         sent_at: nowIso,
@@ -317,6 +309,23 @@ export default async function handler(req, res) {
         provider_id: provider_id || "",
         last_error: null,
         error: null,
+      });
+
+      // Log successful send to sms_sends
+      await supabaseAdmin.from("sms_sends").insert({
+        user_id: row.user_id || null,
+        queue_id: id,
+        phone: to,
+        message,
+        origin,
+        status: "sent",
+        sent_at: nowIso,
+        failed_at: null,
+        provider_id: provider_id || null,
+        delivery_status: "delivered", // optimistic, update later if webhooks supported
+        last_error: null,
+        error_message: null,
+        created_at: nowIso,
       });
 
       results.push({ id, ok: true, provider_id: provider_id || "" });
@@ -327,6 +336,23 @@ export default async function handler(req, res) {
         status: "failed",
         last_error: e?.message || "Send failed",
         error: e?.message || "Send failed",
+      });
+
+      // Log error to sms_sends
+      await supabaseAdmin.from("sms_sends").insert({
+        user_id: row.user_id || null,
+        queue_id: id,
+        phone: to,
+        message,
+        origin,
+        status: "failed",
+        sent_at: null,
+        failed_at: nowIso,
+        provider_id: null,
+        delivery_status: "failed",
+        last_error: e?.message || "Send failed",
+        error_message: e?.message || "Send failed",
+        created_at: nowIso,
       });
 
       results.push({ id, ok: false, error: e?.message || "Send failed" });

@@ -1,33 +1,28 @@
 /**
  * scripts/sendEmailWorker.js
- * Full replacement (CommonJS) — polls public.email_sends for unprocessed rows and sends via SendGrid.
+ * Conservative worker: SKIPS any send that has no subject AND no HTML body.
  *
- * Requirements (server env):
- * - SUPABASE_URL (used by your utils/supabase-admin)
- * - SUPABASE_SERVICE_ROLE_KEY
- * - SENDGRID_API_KEY
- * - DEFAULT_FROM_EMAIL (optional)
- * - DEFAULT_FROM_NAME  (optional)
- * - WORKER_LIMIT (optional, default 50)
- * - WORKER_INTERVAL_MS (optional, default 5000)
- * - WORKER_SANDBOX (optional, "1" or "true" to default all sends to sandbox)
+ * - Uses your server admin client at ../utils/supabase-admin (must exist and export supabaseAdmin).
+ * - Marks skipped rows with status = 'skipped_no_content' and processed_at so they won't be resent.
+ * - Sends rows that have at least a subject or HTML body.
  *
- * Install deps:
- *   npm install @sendgrid/mail
+ * Requirements:
+ * - SUPABASE_URL & SUPABASE_SERVICE_ROLE_KEY available to utils/supabase-admin
+ * - SENDGRID_API_KEY in env
  *
  * Usage:
- *   node scripts/sendEmailWorker.js
+ *  - Stop any running worker (Ctrl+C in the terminal running it).
+ *  - node scripts/run-worker.js   (recommended, loads .env/.env.local then spawns this file)
+ *  - or node scripts/sendEmailWorker.js (if you run directly and envs are present)
  *
- * Note:
- * - This file requires ../utils/supabase-admin to exist and export supabaseAdmin (your existing file).
- * - It intentionally avoids exposing any secrets.
+ * NOTE: Do not commit any secret environment files (.env/.env.local).
  */
 
 const path = require("path");
 const sgMail = require("@sendgrid/mail");
 const { setTimeout: wait } = require("timers/promises");
 
-// import server admin client (adjust path if your utils directory is different)
+// Import your Supabase admin client; adjust path if your utils folder is elsewhere
 const { supabaseAdmin } = require(path.join(__dirname, "..", "utils", "supabase-admin"));
 
 const POLL_LIMIT = parseInt(process.env.WORKER_LIMIT || "50", 10);
@@ -42,15 +37,9 @@ if (!process.env.SENDGRID_API_KEY) {
 }
 sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 
-/**
- * Extract SendGrid message id from send response (varies by sdk/version and transport)
- * @param {*} sendResponse
- * @returns {string|null}
- */
 function extractSgMessageId(sendResponse) {
   try {
     if (!sendResponse) return null;
-    // @sendgrid/mail typically returns an array of responses
     const maybe = Array.isArray(sendResponse) ? sendResponse[0] : sendResponse;
     const headers = (maybe && maybe.headers) || (maybe && maybe[1] && maybe[1].headers) || null;
     if (!headers) return null;
@@ -60,9 +49,6 @@ function extractSgMessageId(sendResponse) {
   }
 }
 
-/**
- * Build message body and metadata for a send row
- */
 async function buildMessageForSend(sendRow) {
   let broadcast = null;
   if (sendRow.broadcast_id) {
@@ -77,8 +63,9 @@ async function buildMessageForSend(sendRow) {
 
   const fromEmail = (broadcast && broadcast.from_email) || DEFAULT_FROM;
   const fromName = (broadcast && broadcast.from_name) || DEFAULT_FROM_NAME;
-  const subject = sendRow.subject || (broadcast && (broadcast.subject || broadcast.title)) || "No subject";
-  const html = sendRow.bodyHtml || sendRow.body || (broadcast && broadcast.html_content) || "<div></div>";
+  const subject = sendRow.subject || (broadcast && (broadcast.subject || broadcast.title)) || "";
+  // Prefer per-send HTML if present, otherwise broadcast html_content
+  const html = sendRow.bodyHtml || sendRow.body || (broadcast && broadcast.html_content) || "";
 
   return { fromEmail, fromName, subject, html, broadcast };
 }
@@ -101,36 +88,48 @@ async function processBatch() {
     try {
       const { fromEmail, fromName, subject, html } = await buildMessageForSend(s);
 
+      const hasSubject = (subject || "").toString().trim().length > 0;
+      const hasHtml = (html || "").toString().trim().length > 0;
+
+      // Skip rows that have neither subject nor HTML (avoid sending blank emails)
+      if (!hasSubject && !hasHtml) {
+        console.log("[sendEmailWorker] Skipping send (no content):", s.id, s.email);
+        await supabaseAdmin
+          .from("email_sends")
+          .update({
+            processed_at: new Date().toISOString(),
+            status: "skipped_no_content",
+            error_message: "Skipped by worker: no subject and no bodyHtml",
+          })
+          .eq("id", s.id)
+          .is("processed_at", null); // idempotency guard
+        continue;
+      }
+
       const msg = {
         to: s.email,
         from: { email: fromEmail, name: fromName },
-        subject,
-        html,
-        // custom args to help webhook matching
+        subject: hasSubject ? subject : "(No subject)",
+        html: hasHtml ? html : "<div></div>",
         customArgs: {
           gr8_send_row_id: s.id,
           broadcast_id: s.broadcast_id || null,
         },
       };
 
-      // determine sandbox: either per-row or global env override
       const sandboxEnabled = Boolean(
         s.sandbox ||
         s.use_sandbox ||
         process.env.WORKER_SANDBOX === "1" ||
         process.env.WORKER_SANDBOX === "true"
       );
-      if (sandboxEnabled) {
-        msg.mailSettings = { sandboxMode: { enable: true } };
-      }
+      if (sandboxEnabled) msg.mailSettings = { sandboxMode: { enable: true } };
 
       let resp;
       try {
         resp = await sgMail.send(msg);
       } catch (sendErr) {
-        // mark row as failed but processed so it doesn't get stuck in the queue
-        console.error("[sendEmailWorker] SendGrid send error for", s.id, sendErr && sendErr.message ? sendErr.message : sendErr);
-
+        console.error("[sendEmailWorker] SendGrid error for", s.id, sendErr && sendErr.message ? sendErr.message : sendErr);
         await supabaseAdmin
           .from("email_sends")
           .update({
@@ -140,12 +139,10 @@ async function processBatch() {
           })
           .eq("id", s.id)
           .is("processed_at", null);
-
-        continue; // move to next row
+        continue;
       }
 
       const sgMessageId = extractSgMessageId(resp) || null;
-
       const { error: updErr } = await supabaseAdmin
         .from("email_sends")
         .update({
@@ -164,7 +161,7 @@ async function processBatch() {
       }
     } catch (err) {
       console.error("[sendEmailWorker] Unexpected error processing send", s && s.id, err && err.message ? err.message : err);
-      // don't crash the loop
+      // continue processing other rows
     }
   }
 

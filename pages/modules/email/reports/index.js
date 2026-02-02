@@ -1,6 +1,6 @@
 // /pages/modules/email/reports/index.js
-// Email analytics control centre â€” collapsible section summaries + drill-down.
-// LIVE version (reads from email_sends).
+// Email analytics control centre — collapsible section summaries + drill-down.
+// LIVE version (reads from email_sends and sms_sends).
 //
 // Routes:
 // - /modules/email/reports/all
@@ -8,6 +8,7 @@
 // - /modules/email/reports/campaigns
 // - /modules/email/reports/autoresponders
 // - /modules/email/reports/automations
+// - /modules/email/reports/crm-sms
 
 import Head from "next/head";
 import Link from "next/link";
@@ -62,6 +63,32 @@ function calcMetrics(rows) {
   };
 }
 
+// SMS-specific metric calculation (robust to variations in column names)
+function calcSmsMetrics(rows) {
+  const total = rows.length;
+
+  const delivered = rows.filter(
+    (r) => !!r.delivered_at || r.delivery_status === "delivered" || r.last_event === "delivered"
+  ).length;
+
+  const failed = rows.filter(
+    (r) => r.delivery_status === "failed" || r.last_event === "failed" || !!r.failed_at
+  ).length;
+
+  const replied = rows.filter((r) => Number(r.reply_count || r.replies || 0) > 0 || !!r.replied).length;
+
+  const pct = (n) => (total ? Math.round((n / total) * 100) : 0);
+
+  // Map into the generic keys used by the UI so SectionCard can render without structural changes
+  return {
+    sent: total,
+    opened: pct(delivered), // displayed as "Delivered" via card labels
+    clicked: pct(replied), // displayed as "Replies"
+    bounced: pct(failed), // displayed as "Failed"
+    unsub: 0,
+  };
+}
+
 export default function EmailReportsControlCentre() {
   const [range, setRange] = useState("all");
 
@@ -78,8 +105,13 @@ export default function EmailReportsControlCentre() {
   const [rowsAutoresponders, setRowsAutoresponders] = useState([]);
   const [rowsAutomations, setRowsAutomations] = useState([]);
 
+  // SMS rows state
+  const [rowsSms, setRowsSms] = useState([]);
+
+  // Recent combined rows (email + sms) for the table
   const [recentRows, setRecentRows] = useState([]);
 
+  // Cards only for modules that can send/receive data (emails + CRM/SMS)
   const cards = useMemo(
     () => [
       {
@@ -88,23 +120,26 @@ export default function EmailReportsControlCentre() {
         desc: "Combined analytics across all email types.",
         href: "/modules/email/reports/all",
         colour: "#10b981",
-        icon: "ðŸ“ˆ",
+        icon: "📊",
+        metricLabels: ["Sent", "Opened", "Clicked", "Bounced", "Unsubscribed"],
       },
       {
         key: "broadcasts",
         title: "Broadcasts",
         desc: "One-off broadcast emails sent to lists or specific contacts.",
         href: "/modules/email/reports/broadcasts",
-        colour: "#facc15",
-        icon: "ðŸ“§",
+        colour: "#f59e0b",
+        icon: "📢",
+        metricLabels: ["Sent", "Opened", "Clicked", "Bounced", "Unsubscribed"],
       },
       {
         key: "campaigns",
-        title: "campaigns",
+        title: "Campaigns",
         desc: "Multi-step email campaigns and sequences.",
         href: "/modules/email/reports/campaigns",
         colour: "#14b8a6",
-        icon: "ðŸ“£",
+        icon: "📣",
+        metricLabels: ["Sent", "Opened", "Clicked", "Bounced", "Unsubscribed"],
       },
       {
         key: "autoresponders",
@@ -112,7 +147,8 @@ export default function EmailReportsControlCentre() {
         desc: "Autoresponder emails triggered by sign-ups or events.",
         href: "/modules/email/reports/autoresponders",
         colour: "#a855f7",
-        icon: "â±ï¸",
+        icon: "⏱️",
+        metricLabels: ["Sent", "Opened", "Clicked", "Bounced", "Unsubscribed"],
       },
       {
         key: "automations",
@@ -120,7 +156,18 @@ export default function EmailReportsControlCentre() {
         desc: "Emails sent from automation flows and rules.",
         href: "/modules/email/reports/automations",
         colour: "#f97316",
-        icon: "âš™ï¸",
+        icon: "⚙️",
+        metricLabels: ["Sent", "Opened", "Clicked", "Bounced", "Unsubscribed"],
+      },
+      {
+        key: "crm_sms",
+        title: "CRM & SMS",
+        desc: "Contacts, tags and SMS messaging activity.",
+        href: "/modules/email/reports/crm-sms",
+        colour: "#06b6d4",
+        icon: "📱",
+        // metricLabels are used to render meaningful labels for SMS (mapped from internal keys)
+        metricLabels: ["Sent", "Delivered", "Replies", "Failed", "Opt-outs"],
       },
     ],
     []
@@ -166,6 +213,7 @@ export default function EmailReportsControlCentre() {
           setRowscampaigns([]);
           setRowsAutoresponders([]);
           setRowsAutomations([]);
+          setRowsSms([]);
           setRecentRows([]);
           setLoading(false);
           return;
@@ -174,12 +222,14 @@ export default function EmailReportsControlCentre() {
         // Base query for time filter
         const base = (q) => buildTimeFilterQuery(q.eq("user_id", uid), fromIso);
 
-        // Pull all rows for metrics (limit high enough for dashboards)
-        // If you have huge volumes later, we can move to SQL RPC aggregates.
+        // Pull all email_sends rows for metrics (limit high enough for dashboards)
+
         const qAll = base(
           supabase
             .from("email_sends")
-            .select("id, user_id, email, broadcast_id, campaigns_id, automation_id, open_count, click_count, bounced_at, unsubscribed, last_event, last_event_at, created_at")
+            .select(
+              "id, user_id, email, broadcast_id, campaign_id, automation_id, open_count, click_count, bounced_at, unsubscribed, last_event, last_event_at, created_at"
+            )
             .order("created_at", { ascending: false })
             .limit(5000)
         );
@@ -188,12 +238,30 @@ export default function EmailReportsControlCentre() {
         if (allErr) throw allErr;
 
         const broadcasts = (allData || []).filter((r) => !!r.broadcast_id);
-        const campaigns = (allData || []).filter((r) => !!r.campaigns_id);
-        // NOTE: if you later distinguish autoresponders vs campaigns, add autoresponder_id or source_type.
-        // For now: autoresponders = campaigns_id rows where those campaigns are autoresponder-triggered (future),
-        // so we show "0" unless you wire a flag. We'll still surface campaigns_id metrics in campaigns.
+        const campaigns = (allData || []).filter((r) => !!r.campaign_id);
+        // NOTE: autoresponders reserved (no dedicated flag in email_sends by default)
         const autoresponders = []; // reserved for a dedicated id/flag
         const automations = (allData || []).filter((r) => !!r.automation_id);
+
+        // Attempt to fetch SMS rows from sms_sends (best-effort; tolerate missing table)
+        let smsData = [];
+        try {
+          const { data: smsResp, error: smsErr } = await supabase
+            .from("sms_sends")
+            .select("id, user_id, phone, message, delivery_status, delivered_at, failed_at, reply_count, last_event, created_at")
+            .order("created_at", { ascending: false })
+            .limit(5000);
+
+          if (smsErr) {
+            // If the sms table doesn't exist or other non-fatal issue, continue without SMS
+            // don't throw — SMS is optional for some installs
+            smsData = [];
+          } else {
+            smsData = smsResp || [];
+          }
+        } catch (e) {
+          smsData = [];
+        }
 
         if (!mounted) return;
 
@@ -202,9 +270,29 @@ export default function EmailReportsControlCentre() {
         setRowscampaigns(campaigns);
         setRowsAutoresponders(autoresponders);
         setRowsAutomations(automations);
+        setRowsSms(smsData || []);
 
-        // Recent table
-        setRecentRows((allData || []).slice(0, 30));
+        // Recent combined table (email + sms), normalized to include _type for rendering
+        const combined = []
+          .concat(
+            (allData || []).map((r) => ({
+              ...r,
+              _type: "email",
+            }))
+          )
+          .concat(
+            (smsData || []).map((s) => ({
+              ...s,
+              _type: "sms",
+            }))
+          )
+          .sort((a, b) => {
+            const ta = new Date(a.last_event_at || a.created_at || 0).getTime();
+            const tb = new Date(b.last_event_at || b.created_at || 0).getTime();
+            return tb - ta;
+          });
+
+        setRecentRows(combined.slice(0, 30));
 
         setLoading(false);
       } catch (e) {
@@ -225,6 +313,7 @@ export default function EmailReportsControlCentre() {
   const pillscampaigns = useMemo(() => calcMetrics(rowscampaigns), [rowscampaigns]);
   const pillsAutoresponders = useMemo(() => calcMetrics(rowsAutoresponders), [rowsAutoresponders]);
   const pillsAutomations = useMemo(() => calcMetrics(rowsAutomations), [rowsAutomations]);
+  const pillsSms = useMemo(() => calcSmsMetrics(rowsSms), [rowsSms]);
 
   const pillsByKey = {
     all: pillsAll,
@@ -232,6 +321,7 @@ export default function EmailReportsControlCentre() {
     campaigns: pillscampaigns,
     autoresponders: pillsAutoresponders,
     automations: pillsAutomations,
+    crm_sms: pillsSms,
   };
 
   return (
@@ -246,18 +336,18 @@ export default function EmailReportsControlCentre() {
           <div style={styles.banner}>
             <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
               <div style={styles.bannerIconWrap} aria-hidden="true">
-                <span style={{ fontSize: 48, lineHeight: 1 }}>ðŸ“ˆ</span>
+                <span style={{ fontSize: 48, lineHeight: 1 }}>📊</span>
               </div>
               <div>
                 <div style={styles.bannerTitle}>Email analytics control centre</div>
                 <div style={styles.bannerSub}>
-                  Broadcasts, campaigns, autoresponders, automations â€“ all your key email stats in one dashboard.
+                  Broadcasts, campaigns, autoresponders, automations — all your key email stats in one dashboard.
                 </div>
               </div>
             </div>
 
             <Link href="/modules/email" style={styles.backBtn}>
-              â† Back
+              ← Back
             </Link>
           </div>
 
@@ -282,7 +372,7 @@ export default function EmailReportsControlCentre() {
             </button>
           </div>
 
-          {loading ? <div style={styles.note}>Loading live analyticsâ€¦</div> : null}
+          {loading ? <div style={styles.note}>Loading live analytics…</div> : null}
 
           {!loading && !userId ? (
             <div style={styles.note}>You must be logged in to view analytics.</div>
@@ -296,8 +386,8 @@ export default function EmailReportsControlCentre() {
 
           {!loading && userId && !loadErr ? (
             <div style={styles.note}>
-              Live data from <code>email_sends</code>. (If something reads 0, it means that email type hasnâ€™t written into
-              <code> email_sends</code> yet.)
+              Live data from <code>email_sends</code> and <code>sms_sends</code> (if available). (If something reads 0,
+              it means that type hasn’t written into the corresponding table yet.)
             </div>
           ) : null}
 
@@ -316,37 +406,60 @@ export default function EmailReportsControlCentre() {
 
           {/* Recent */}
           <div style={styles.recentWrap}>
-            <div style={styles.recentTitle}>Recent email sends</div>
+            <div style={styles.recentTitle}>Recent sends (Email & SMS)</div>
             <div style={styles.recentSub}>
-              Showing the last {recentRows.length} rows from <code>email_sends</code> for this period.
+              Showing the last {recentRows.length} rows from <code>email_sends</code> and <code>sms_sends</code> for this
+              period.
             </div>
 
             {!recentRows.length ? (
               <div style={styles.recentEmpty}>
-                No rows found in <code>email_sends</code> yet for this time range.
+                No rows found in <code>email_sends</code> or <code>sms_sends</code> yet for this time range.
               </div>
             ) : (
               <div style={styles.tableWrap}>
                 <div style={styles.tableHeadRow}>
                   <div style={styles.th}>When</div>
-                  <div style={styles.th}>Email</div>
+                  <div style={styles.th}>Recipient</div>
                   <div style={styles.th}>Type</div>
-                  <div style={styles.th}>Open</div>
-                  <div style={styles.th}>Click</div>
+                  <div style={styles.th}>Opens / Delivered</div>
+                  <div style={styles.th}>Clicks / Replies</div>
                   <div style={styles.th}>Last event</div>
                 </div>
 
                 {recentRows.map((r) => {
-                  const type = r.broadcast_id ? "Broadcast" : r.campaigns_id ? "campaigns" : r.automation_id ? "Automation" : "â€”";
+                  const isSms = r._type === "sms";
+                  const type = isSms
+                    ? "SMS"
+                    : r.broadcast_id
+                    ? "Broadcast"
+                    : r.campaigns_id
+                    ? "Campaign"
+                    : r.automation_id
+                    ? "Automation"
+                    : "Email";
+
                   const when = r.last_event_at || r.created_at;
+                  const recipient = isSms ? r.phone || "—" : r.email || "—";
+
+                  const opensCell = isSms
+                    ? r.delivered_at || r.delivery_status === "delivered" || r.last_event === "delivered"
+                      ? 1
+                      : 0
+                    : Number(r.open_count || 0);
+
+                  const clicksCell = isSms ? Number(r.reply_count || r.replies || 0) : Number(r.click_count || 0);
+
+                  const lastEvent = r.last_event || r.delivery_status || "—";
+
                   return (
-                    <div key={r.id} style={styles.tr}>
-                      <div style={styles.td}>{when ? new Date(when).toLocaleString() : "â€”"}</div>
-                      <div style={styles.td}>{r.email || "â€”"}</div>
+                    <div key={`${r._type}-${r.id}`} style={styles.tr}>
+                      <div style={styles.td}>{when ? new Date(when).toLocaleString() : "—"}</div>
+                      <div style={styles.td}>{recipient}</div>
                       <div style={styles.td}>{type}</div>
-                      <div style={styles.td}>{Number(r.open_count || 0)}</div>
-                      <div style={styles.td}>{Number(r.click_count || 0)}</div>
-                      <div style={styles.td}>{r.last_event || "â€”"}</div>
+                      <div style={styles.td}>{opensCell}</div>
+                      <div style={styles.td}>{clicksCell}</div>
+                      <div style={styles.td}>{lastEvent}</div>
                     </div>
                   );
                 })}
@@ -380,6 +493,9 @@ function SectionCard({ card, pills, isOpen, onToggle }) {
   const safeColour = card.colour || "#10b981";
   const p = pills || { sent: 0, opened: 0, clicked: 0, bounced: 0, unsub: 0 };
 
+  const defaultLabels = ["Sent", "Opened", "Clicked", "Bounced", "Unsubscribed"];
+  const labels = card.metricLabels || defaultLabels;
+
   return (
     <div style={{ ...styles.sectionCard, border: `1px solid rgba(255,255,255,0.10)` }}>
       {/* Header = click to collapse/expand (NO navigation) */}
@@ -393,7 +509,7 @@ function SectionCard({ card, pills, isOpen, onToggle }) {
       >
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
           <div style={styles.sectionIconWrap} aria-hidden="true">
-            <span style={{ fontSize: 24, lineHeight: 1 }}>{card.icon || "ðŸ“Š"}</span>
+            <span style={{ fontSize: 24, lineHeight: 1 }}>{card.icon || "📊"}</span>
           </div>
 
           <div style={{ textAlign: "left" }}>
@@ -411,11 +527,11 @@ function SectionCard({ card, pills, isOpen, onToggle }) {
               e.stopPropagation();
             }}
           >
-            View report â†’
+            View report →
           </Link>
 
           <div style={styles.chev} aria-hidden="true">
-            {isOpen ? "â–²" : "â–¼"}
+            {isOpen ? "▾" : "▸"}
           </div>
         </div>
       </button>
@@ -424,24 +540,24 @@ function SectionCard({ card, pills, isOpen, onToggle }) {
       {isOpen ? (
         <div style={styles.sectionBody}>
           <div style={styles.sectionPillsRow}>
-            <Pill label="Sent" value={p.sent ?? 0} />
-            <Pill label="Opened" value={`${p.opened ?? 0}%`} />
-            <Pill label="Clicked" value={`${p.clicked ?? 0}%`} />
-            <Pill label="Bounced" value={`${p.bounced ?? 0}%`} />
-            <Pill label="Unsubscribed" value={`${p.unsub ?? 0}%`} />
+            <Pill label={labels[0]} value={p.sent ?? 0} />
+            <Pill label={labels[1]} value={`${p.opened ?? 0}%`} />
+            <Pill label={labels[2]} value={`${p.clicked ?? 0}%`} />
+            <Pill label={labels[3]} value={`${p.bounced ?? 0}%`} />
+            <Pill label={labels[4]} value={`${p.unsub ?? 0}%`} />
           </div>
 
           <div style={styles.summaryGrid}>
-            <SummaryBox title="Sent" value={p.sent ?? 0} />
-            <SummaryBox title="Opened" value={`${p.opened ?? 0}%`} />
-            <SummaryBox title="Clicked" value={`${p.clicked ?? 0}%`} />
-            <SummaryBox title="Bounced" value={`${p.bounced ?? 0}%`} />
-            <SummaryBox title="Unsubscribed" value={`${p.unsub ?? 0}%`} />
+            <SummaryBox title={labels[0]} value={p.sent ?? 0} />
+            <SummaryBox title={labels[1]} value={`${p.opened ?? 0}%`} />
+            <SummaryBox title={labels[2]} value={`${p.clicked ?? 0}%`} />
+            <SummaryBox title={labels[3]} value={`${p.bounced ?? 0}%`} />
+            <SummaryBox title={labels[4]} value={`${p.unsub ?? 0}%`} />
           </div>
 
           <div style={{ marginTop: 12 }}>
             <Link href={card.href} style={styles.deepLink}>
-              Open full {card.title} report â†’
+              Open full {card.title} report →
             </Link>
           </div>
         </div>
@@ -677,7 +793,7 @@ const styles = {
   },
   tableHeadRow: {
     display: "grid",
-    gridTemplateColumns: "1.4fr 2fr 1fr 0.6fr 0.6fr 1fr",
+    gridTemplateColumns: "1.4fr 2fr 1fr 0.8fr 0.8fr 1fr",
     gap: 0,
     padding: "10px 12px",
     background: "rgba(255,255,255,0.06)",
@@ -685,7 +801,7 @@ const styles = {
   th: { fontSize: 18, fontWeight: 900, opacity: 0.9 },
   tr: {
     display: "grid",
-    gridTemplateColumns: "1.4fr 2fr 1fr 0.6fr 0.6fr 1fr",
+    gridTemplateColumns: "1.4fr 2fr 1fr 0.8fr 0.8fr 1fr",
     gap: 0,
     padding: "10px 12px",
     background: "rgba(2,6,23,0.45)",

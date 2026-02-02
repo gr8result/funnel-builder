@@ -1,4 +1,4 @@
-// /pages/modules/email/index.js
+﻿// /pages/modules/email/index.js
 import Head from "next/head";
 import Link from "next/link";
 import { useState, useEffect } from "react";
@@ -41,22 +41,24 @@ export default function EmailMarketingHub() {
       <main className="wrap">
         <div className="container">
           {/* ---------- Banner ---------- */}
-          <div className="banner">
-            <div className="banner-left">
-              <div className="banner-icon" aria-hidden>
-                <Icon name="mail" size={48} />
+          <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 20 }}>
+            <div className="banner" style={{ background: '#facc15', color: '#000', border: 'none', width: 1320, maxWidth: '100%' }}>
+              <div className="banner-left">
+                <div className="banner-icon" aria-hidden style={{ background: 'rgba(0,0,0,0.1)', color: '#000', fontSize: 48, width: 69, height: 69, display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: 10 }}>
+                  <span role="img" aria-label="Email" style={{ fontSize: 48 }}>📧</span>
+                </div>
+                <div className="banner-text">
+                  <h1 className="banner-title" style={{ color: '#000' }}>Email Marketing</h1>
+                  <p className="banner-desc" style={{ color: '#000', opacity: 0.92 }}>Broadcasts, campaigns, autoresponders, lists.</p>
+                </div>
               </div>
-              <div className="banner-text">
-                <h1 className="banner-title">Email Marketing</h1>
-                <p className="banner-desc">Broadcasts, autoresponders, lists.</p>
-              </div>
-            </div>
 
-            <Link href="/dashboard">
-              <button className="back-btn" type="button">
-                ← Back
-              </button>
-            </Link>
+              <Link href="/dashboard">
+                <button className="back-btn" type="button" style={{ background: 'rgba(0,0,0,0.1)', color: '#000', border: '1px solid rgba(0,0,0,0.2)' }}>
+                  ← Back
+                </button>
+              </Link>
+            </div>
           </div>
 
           {/* ---------- Current Plan Banner ---------- */}
@@ -102,7 +104,7 @@ export default function EmailMarketingHub() {
             <div className="grid">
               <Card
                 colour="#f59e0b"
-                icon="📧"
+                icon="📢"
                 title="Broadcasts"
                 blurb="Send one-off emails to your lists."
                 actions={[
@@ -163,7 +165,7 @@ export default function EmailMarketingHub() {
                 blurb="Workflows, triggers and actions."
                 actions={[
                   { href: "/modules/email/automation", label: "Open" },
-                  { href: "/modules/email/automation/new", label: "Create" },
+                  
                 ]}
               />
             </div>
@@ -211,12 +213,12 @@ export default function EmailMarketingHub() {
           display: flex;
           justify-content: space-between;
           align-items: center;
-          background: #facc15;
+          background: #a855f7;
           padding: 18px 22px;
           border-radius: 14px;
           margin: 0 auto 20px;
-          border: 2px solid #eab308;
-          color: #1a1f29;
+          border: none;
+          color: #fff;
         }
 
         .banner-left {
@@ -422,3 +424,6 @@ function Icon({ name, size = 48 }) {
       );
   }
 }
+
+
+

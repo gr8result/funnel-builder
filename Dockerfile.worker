@@ -1,0 +1,30 @@
+# Dockerfile.worker
+# Builds the send-email worker container (Node 20 slim).
+FROM node:20-slim
+
+WORKDIR /usr/src/app
+
+# install minimal system deps then cleanup
+RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
+
+# copy package files for faster dependency install
+COPY package*.json ./
+
+# NOTE: use npm install here to avoid build failure if lockfile is out of sync.
+# This is a pragmatic fix for now. Later we can switch back to `npm ci` after
+# you update package-lock.json locally and commit it.
+RUN npm install --omit=dev --no-audit --no-fund
+
+# copy app code
+COPY . .
+
+# create unprivileged user
+RUN useradd --user-group --create-home --shell /bin/false appuser \
+  && chown -R appuser:appuser /usr/src/app
+
+USER appuser
+
+ENV NODE_ENV=production
+
+# default command: run the bootstrap which loads .env and spawns the worker
+CMD ["node", "scripts/run-worker.js"]

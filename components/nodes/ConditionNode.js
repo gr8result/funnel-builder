@@ -29,6 +29,10 @@ export default function ConditionNode({ data }) {
         {summary}
       </div>
 
+      <div style={{ marginTop: 8, fontSize: 16, opacity: 0.9 }}>
+        Waiting: <strong>{Number(data?.activeMembers || 0)}</strong>
+      </div>
+
       <Handle
         type="target"
         position={Position.Top}
