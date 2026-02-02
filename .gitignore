@@ -44,6 +44,3 @@ node_modules/
 .vercel
 .env*.local
 
-components/email/
-components/website-builder/
-pages/modules/website-builder/sections/
