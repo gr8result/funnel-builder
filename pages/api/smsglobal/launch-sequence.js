@@ -391,21 +391,20 @@ export default async function handler(req, res) {
     return json(res, 400, { ok: false, error: "Invalid audience.type" });
   }
 
-  // Build sms_queue rows with cumulative delays
+  // Use user_id as origin (immutable, unique per user)
+  const smsOrigin = user.id;
+
+  // Build sms_queue rows with correct delays per lead (each lead gets their own schedule)
   const now = Date.now();
-  let cumulativeMinutes = 0;
-
   const baseRows = [];
-  const available_at = new Date(now).toISOString();
-  for (let stepIndex = 0; stepIndex < steps.length; stepIndex++) {
-    const st = steps[stepIndex];
-    const addMinutes = Math.max(0, Number(st.delay || 0)) * unitToMinutes(st.unit);
-    cumulativeMinutes += addMinutes;
-
-    const sendAtMs = now + cumulativeMinutes * 60 * 1000;
-    const send_at_iso = new Date(sendAtMs).toISOString();
-
-    for (const r of recipients) {
+  for (const r of recipients) {
+    let cumulativeMinutes = 0;
+    for (let stepIndex = 0; stepIndex < steps.length; stepIndex++) {
+      const st = steps[stepIndex];
+      const addMinutes = Math.max(0, Number(st.delay || 0)) * unitToMinutes(st.unit);
+      cumulativeMinutes += addMinutes;
+      const sendAtMs = now + cumulativeMinutes * 60 * 1000;
+      const send_at_iso = new Date(sendAtMs).toISOString();
       baseRows.push({
         user_id: user.id,
         lead_id: r.lead_id,
@@ -414,8 +413,9 @@ export default async function handler(req, res) {
         body: st.message,
         send_at_iso,
         scheduled_for: send_at_iso,
-        available_at,
+        available_at: new Date(now).toISOString(),
         status: "queued",
+        origin: smsOrigin,
       });
     }
   }

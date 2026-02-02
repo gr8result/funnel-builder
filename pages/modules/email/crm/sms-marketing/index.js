@@ -17,6 +17,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/router";
 import { supabase } from "../../../../../utils/supabase-client";
 
+
 const CLEAN_FONT =
   "Inter, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, 'Apple Color Emoji', 'Segoe UI Emoji'";
 
@@ -215,6 +216,18 @@ function EmojiPicker({ open, onPick, onClose }) {
 }
 
 export default function SmsMarketingPage() {
+    // Store the user's user_id for SMS sender/origin
+    const [userId, setUserId] = useState("");
+    // Fetch user_id for current user (for SMS sender/origin)
+    useEffect(() => {
+      async function fetchUserId() {
+        try {
+          const { data: { user } } = await supabase.auth.getUser();
+          if (user?.id) setUserId(user.id);
+        } catch {}
+      }
+      fetchUserId();
+    }, []);
   const router = useRouter();
 
   const [bannerError, setBannerError] = useState("");
@@ -459,6 +472,7 @@ export default function SmsMarketingPage() {
           }))
           .filter((x) => x.message)
           .slice(0, 3),
+        origin: userId || undefined,
       };
 
       const r = await apiPost("/api/smsglobal/launch-sequence", payload);
@@ -487,10 +501,11 @@ export default function SmsMarketingPage() {
       if (!msg) throw new Error("Enter a message.");
 
       // ✅ correct route is /api/smsglobal/SMSSend
+      const origin = userId || undefined;
       if (singleAudienceType === "lead") {
         const lead_id = s(singleLeadId);
         if (!lead_id) throw new Error("Pick a lead.");
-        const r = await apiPost("/api/smsglobal/SMSSend", { lead_id, message: msg });
+        const r = await apiPost("/api/smsglobal/SMSSend", { lead_id, message: msg, origin });
         setBannerError(`Sent OK (provider_id: ${r?.provider_id || "-"})`);
         setSingleMessage("");
         return;
@@ -499,7 +514,7 @@ export default function SmsMarketingPage() {
       if (singleAudienceType === "manual") {
         const to = normalizePhoneForSend(singleManualPhone);
         if (!to) throw new Error("Enter a phone number.");
-        const r = await apiPost("/api/smsglobal/SMSSend", { to, message: msg });
+        const r = await apiPost("/api/smsglobal/SMSSend", { to, message: msg, origin });
         setBannerError(`Sent OK (provider_id: ${r?.provider_id || "-"})`);
         setSingleMessage("");
         return;

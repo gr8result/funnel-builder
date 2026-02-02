@@ -15,6 +15,10 @@ export default function ConditionNodeDrawer({ node, onSave, onClose }) {
   const [cartTimeout, setCartTimeout] = useState(initial.cartTimeout || 30);
   const [waitDays, setWaitDays] = useState(initial.waitDays !== undefined ? initial.waitDays : 3);
 
+  const stats = node?.data?.stats || {};
+  const incomingStats = node?.data?.incomingEmailStats || null;
+  const incomingLabel = node?.data?.incomingEmailLabel || "Previous Email";
+
   const saveAndClose = () => {
     const newData = {
       ...node.data,
@@ -44,6 +48,26 @@ export default function ConditionNodeDrawer({ node, onSave, onClose }) {
         </div>
 
         <div style={s.body}>
+
+          <div style={s.statsBox}>
+            <div style={s.statsTitle}>Node Statistics</div>
+            <div style={s.statsRow}><span>Waiting</span><span>{Number(node?.data?.activeMembers || 0)}</span></div>
+            <div style={s.statsRow}><span>Processed</span><span>{Number(stats.processed || 0)}</span></div>
+            <div style={s.statsRow}><span>Delivered</span><span>{Number(stats.delivered || 0)}</span></div>
+            <div style={s.statsRow}><span>Opened</span><span>{Number(stats.opened || 0)}</span></div>
+            <div style={s.statsRow}><span>Clicked</span><span>{Number(stats.clicked || 0)}</span></div>
+
+            {incomingStats && (
+              <>
+                <div style={s.statsDivider} />
+                <div style={s.statsSubtitle}>{incomingLabel} (incoming email)</div>
+                <div style={s.statsRow}><span>Processed</span><span>{Number(incomingStats.processed || 0)}</span></div>
+                <div style={s.statsRow}><span>Delivered</span><span>{Number(incomingStats.delivered || 0)}</span></div>
+                <div style={s.statsRow}><span>Opened</span><span>{Number(incomingStats.opened || 0)}</span></div>
+                <div style={s.statsRow}><span>Clicked</span><span>{Number(incomingStats.clicked || 0)}</span></div>
+              </>
+            )}
+          </div>
 
           {/* LABEL */}
           <label style={s.label}>Condition Label</label>
@@ -115,27 +139,24 @@ export default function ConditionNodeDrawer({ node, onSave, onClose }) {
           {/* EMAIL OPENED */}
           {type === "email_opened" && (
             <>
-              <label style={s.label}>Email ID or Name</label>
+              <label style={s.label}>Wait (days)</label>
               <input
-                value={value}
-                onChange={(e) => setValue(e.target.value)}
+                type="number"
+                min={1}
+                value={waitDays}
+                onChange={(e) => setWaitDays(Number(e.target.value))}
                 style={s.input}
-                placeholder="Which email to check?"
+                placeholder="e.g. 3"
               />
+              <p style={{ opacity: 0.7, marginTop: -6 }}>
+                Wait this long for an open before routing to the "No" path. (2 = 48 hours)
+              </p>
             </>
           )}
 
           {/* EMAIL NOT OPENED */}
           {type === "email_not_opened" && (
             <>
-              <label style={s.label}>Email ID or Name</label>
-              <input
-                value={value}
-                onChange={(e) => setValue(e.target.value)}
-                style={s.input}
-                placeholder="Which email to check?"
-              />
-
               <label style={s.label}>Wait (days)</label>
               <input
                 type="number"
@@ -269,6 +290,35 @@ const s = {
     borderRadius: 8,
     color: "#fff",
     marginBottom: 14,
+  },
+  statsBox: {
+    border: "1px solid #1e293b",
+    background: "#0b1220",
+    borderRadius: 10,
+    padding: 12,
+    marginBottom: 16,
+  },
+  statsTitle: {
+    fontWeight: 800,
+    marginBottom: 8,
+  },
+  statsSubtitle: {
+    fontWeight: 700,
+    fontSize: 12,
+    opacity: 0.85,
+    marginBottom: 6,
+  },
+  statsRow: {
+    display: "flex",
+    justifyContent: "space-between",
+    fontSize: 13,
+    opacity: 0.9,
+    marginBottom: 4,
+  },
+  statsDivider: {
+    height: 1,
+    background: "#1e293b",
+    margin: "8px 0",
   },
   footer: {
     display: "flex",

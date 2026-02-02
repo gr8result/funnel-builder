@@ -34,6 +34,40 @@ export default function CourseLearnPage() {
     return set;
   }, [entitlements, hasFullAccess, modules]);
 
+  function isModuleUnlocked(moduleId) {
+    if (hasFullAccess) return true;
+    return unlockedModuleIds.has(moduleId);
+  }
+
+  function findFirstUnlockedLesson(mods, lessonsMap, ents) {
+    const full = (ents || []).some((e) => e.entitlement_type === "full_course");
+    const unlocked = new Set();
+    if (!full) {
+      (ents || [])
+        .filter((e) => e.entitlement_type === "module" && e.module_id)
+        .forEach((e) => unlocked.add(e.module_id));
+    }
+
+    for (const m of mods) {
+      const ok = full || unlocked.has(m.id);
+      if (!ok) continue;
+      const lessons = lessonsMap[m.id] || [];
+      if (lessons.length) return lessons[0];
+    }
+    return null;
+  }
+
+  // ✅ Stripe return handler MUST be at top-level (NOT inside load)
+  useEffect(() => {
+    if (!router.isReady) return;
+    if (!courseId) return;
+
+    if (router.query?.success === "1") {
+      // shallow replace to clear query params
+      router.replace(`/modules/courses/${courseId}/learn`, undefined, { shallow: true });
+    }
+  }, [router.isReady, router.query?.success, courseId]);
+
   useEffect(() => {
     let alive = true;
 
@@ -54,6 +88,12 @@ export default function CourseLearnPage() {
 
       if (courseErr) {
         console.error(courseErr);
+        if (!alive) return;
+        setCourse(null);
+        setModules([]);
+        setLessonsByModule({});
+        setEntitlements([]);
+        setActiveLesson(null);
         setLoading(false);
         return;
       }
@@ -67,6 +107,7 @@ export default function CourseLearnPage() {
       if (modErr) console.error(modErr);
 
       const moduleIds = (moduleData || []).map((m) => m.id);
+
       let lessonsMap = {};
       if (moduleIds.length) {
         const { data: lessonsData, error: lessonErr } = await supabase
@@ -76,6 +117,7 @@ export default function CourseLearnPage() {
           .order("sort_order", { ascending: true });
 
         if (lessonErr) console.error(lessonErr);
+
         lessonsMap = (lessonsData || []).reduce((acc, lesson) => {
           acc[lesson.module_id] = acc[lesson.module_id] || [];
           acc[lesson.module_id].push(lesson);
@@ -112,42 +154,18 @@ export default function CourseLearnPage() {
     };
   }, [courseId]);
 
-  function isModuleUnlocked(moduleId) {
-    if (hasFullAccess) return true;
-    return unlockedModuleIds.has(moduleId);
-  }
-
-  function findFirstUnlockedLesson(mods, lessonsMap, ents) {
-    const full = (ents || []).some((e) => e.entitlement_type === "full_course");
-    const unlocked = new Set();
-    if (!full) {
-      (ents || [])
-        .filter((e) => e.entitlement_type === "module" && e.module_id)
-        .forEach((e) => unlocked.add(e.module_id));
-    }
-
-    for (const m of mods) {
-      const ok = full || unlocked.has(m.id);
-      if (!ok) continue;
-      const lessons = lessonsMap[m.id] || [];
-      if (lessons.length) return lessons[0];
-    }
-    return null;
-  }
-
-  // ✅ Correct + safe checkout starter
   async function startCheckout({ scope, moduleId }) {
     try {
       setBusy(true);
 
       const { data: session } = await supabase.auth.getSession();
       const token = session?.session?.access_token;
+
       if (!token) {
         alert("Please log in first.");
         return;
       }
 
-      // ✅ IMPORTANT: API routes are /api/..., NOT /pages/api/...
       const res = await fetch("/api/courses/create-checkout-session", {
         method: "POST",
         headers: {
@@ -170,9 +188,18 @@ export default function CourseLearnPage() {
     }
   }
 
+  // ✅ When user clicks locked module/lesson: ALWAYS go to payment
+  function onLockedModuleClick(moduleId) {
+    if (!userId) {
+      alert("Please log in first.");
+      return;
+    }
+    startCheckout({ scope: "module", moduleId });
+  }
+
   if (loading) {
     return (
-      <div className={styles.pageWrap}>
+      <div className={styles.pageWrap} style={{ fontSize: 16 }}>
         <div style={{ padding: 18 }}>Loading course…</div>
       </div>
     );
@@ -205,21 +232,29 @@ export default function CourseLearnPage() {
         }}
       >
         <div>
-          <div style={{ fontSize: 34, fontWeight: 700, lineHeight: 1.1 }}>
+          <div style={{ fontSize: 48, fontWeight: 500, lineHeight: 1.1 }}>
             {course.title || "Course"}
           </div>
-          <div style={{ fontSize: 16, opacity: 0.95, marginTop: 6 }}>
+
+          <div style={{ fontSize: 18, opacity: 0.95, marginTop: 6 }}>
             {hasFullAccess
               ? "Access: Full course unlocked"
               : userId
               ? "Access: Module-by-module unlock"
               : "Login required to purchase/unlock"}
           </div>
+
+          {!!course.description && (
+            <div style={{ fontSize: 16, opacity: 0.92, marginTop: 6, maxWidth: 820 }}>
+              {course.description}
+            </div>
+          )}
         </div>
 
         <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+          {/* ✅ CHANGE: Dashboard button becomes Marketplace */}
           <Link
-            href="/pages/store/dashboard"
+            href="/modules/courses"
             style={{
               background: "rgba(255,255,255,0.18)",
               border: "1px solid rgba(255,255,255,0.28)",
@@ -231,7 +266,7 @@ export default function CourseLearnPage() {
               whiteSpace: "nowrap",
             }}
           >
-            ← Dashboard
+            ← Marketplace
           </Link>
 
           {!hasFullAccess && (
@@ -244,7 +279,7 @@ export default function CourseLearnPage() {
                 border: "none",
                 padding: "10px 14px",
                 borderRadius: 10,
-                fontWeight: 800,
+                fontWeight: 600,
                 cursor: !userId || busy ? "not-allowed" : "pointer",
                 opacity: !userId || busy ? 0.7 : 1,
                 whiteSpace: "nowrap",
@@ -270,6 +305,7 @@ export default function CourseLearnPage() {
         <div
           style={{
             background: "#fff",
+            color: "#111",
             borderRadius: 14,
             border: "1px solid #e7e7e7",
             padding: 12,
@@ -277,94 +313,137 @@ export default function CourseLearnPage() {
             overflow: "auto",
           }}
         >
-          <div style={{ fontSize: 18, fontWeight: 800, marginBottom: 10 }}>
+          <div style={{ fontSize: 18, fontWeight: 600, marginBottom: 10 }}>
             Modules
           </div>
 
-          {modules.map((m) => {
-            const unlocked = isModuleUnlocked(m.id);
-            const lessons = lessonsByModule[m.id] || [];
+          {modules.length === 0 ? (
+            <div
+              style={{
+                border: "1px dashed #ddd",
+                borderRadius: 12,
+                padding: 12,
+                opacity: 0.85,
+              }}
+            >
+              <div style={{ fontWeight: 600, marginBottom: 6 }}>No modules yet</div>
+              <div style={{ fontSize: 16 }}>
+                Vendors add modules/lessons in the Course Editor:
+                <div style={{ marginTop: 6, fontWeight: 700 }}>
+                  /modules/courses/{courseId}/edit
+                </div>
+              </div>
+            </div>
+          ) : (
+            modules.map((m) => {
+              const unlocked = isModuleUnlocked(m.id);
+              const lessons = lessonsByModule[m.id] || [];
 
-            return (
-              <div
-                key={m.id}
-                style={{
-                  border: "1px solid #ededed",
-                  borderRadius: 12,
-                  padding: 10,
-                  marginBottom: 10,
-                  background: unlocked ? "#fff" : "#fafafa",
-                }}
-              >
-                <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
-                  <div style={{ fontWeight: 800 }}>
-                    {m.title || "Untitled Module"}
-                    {!unlocked ? (
-                      <span style={{ marginLeft: 8, fontWeight: 800, color: "#f43f5e" }}>
-                        🔒 Locked
-                      </span>
-                    ) : (
-                      <span style={{ marginLeft: 8, fontWeight: 800, color: "#16a34a" }}>
-                        ✅ Open
-                      </span>
+              return (
+                <div
+                  key={m.id}
+                  style={{
+                    border: "1px solid #ededed",
+                    borderRadius: 12,
+                    padding: 10,
+                    marginBottom: 10,
+                    background: unlocked ? "#fff" : "#fafafa",
+                  }}
+                >
+                  <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
+                    <div style={{ fontWeight: 800 }}>
+                      {m.title || "Untitled Module"}
+                      {!unlocked ? (
+                        <span style={{ marginLeft: 8, fontWeight: 800, color: "#f43f5e" }}>
+                          🔒 Locked
+                        </span>
+                      ) : (
+                        <span style={{ marginLeft: 8, fontWeight: 800, color: "#16a34a" }}>
+                          ✅ Open
+                        </span>
+                      )}
+                    </div>
+
+                    {/* ✅ Locked modules ALWAYS go to checkout (no "module not found") */}
+                    {!unlocked && (
+                      <button
+                        onClick={() => onLockedModuleClick(m.id)}
+                        disabled={busy || !userId}
+                        style={{
+                          background: "#facc15",
+                          border: "none",
+                          padding: "8px 10px",
+                          borderRadius: 10,
+                          fontWeight: 700,
+                          cursor: busy || !userId ? "not-allowed" : "pointer",
+                          opacity: busy || !userId ? 0.7 : 1,
+                          whiteSpace: "nowrap",
+                        }}
+                      >
+                        {busy ? "…" : "Unlock"}
+                      </button>
                     )}
                   </div>
 
-                  {!unlocked && userId && (
-                    <button
-                      onClick={() => startCheckout({ scope: "module", moduleId: m.id })}
-                      disabled={busy}
-                      style={{
-                        background: "#facc15",
-                        border: "none",
-                        padding: "8px 10px",
-                        borderRadius: 10,
-                        fontWeight: 900,
-                        cursor: busy ? "not-allowed" : "pointer",
-                        opacity: busy ? 0.7 : 1,
-                        whiteSpace: "nowrap",
-                      }}
-                    >
-                      {busy ? "…" : "Unlock"}
-                    </button>
+                  {!!m.description && (
+                    <div style={{ marginTop: 6, fontSize: 16, opacity: 0.85 }}>
+                      {m.description}
+                    </div>
                   )}
-                </div>
 
-                <div style={{ marginTop: 8, display: "grid", gap: 6 }}>
-                  {lessons.map((l) => {
-                    const disabled = !unlocked;
-                    const isActive = activeLesson?.id === l.id;
+                  <div style={{ marginTop: 10, display: "grid", gap: 6 }}>
+                    {lessons.length === 0 ? (
+                      <div style={{ fontSize: 16, opacity: 0.75 }}>
+                        No lessons yet for this module.
+                      </div>
+                    ) : (
+                      lessons.map((l) => {
+                        const isActive = activeLesson?.id === l.id;
 
-                    return (
-                      <button
-                        key={l.id}
-                        disabled={disabled}
-                        onClick={() => setActiveLesson(l)}
-                        style={{
-                          textAlign: "left",
-                          borderRadius: 10,
-                          border: "1px solid #efefef",
-                          padding: "10px 10px",
-                          background: isActive ? "rgba(34,151,197,0.10)" : "#fff",
-                          cursor: disabled ? "not-allowed" : "pointer",
-                          opacity: disabled ? 0.55 : 1,
-                          fontWeight: 700,
-                        }}
-                      >
-                        {l.title || "Lesson"}
-                      </button>
-                    );
-                  })}
+                        return (
+                          <button
+                            key={l.id}
+                            onClick={() => {
+                              if (!unlocked) {
+                                onLockedModuleClick(m.id);
+                                return;
+                              }
+                              setActiveLesson(l);
+                            }}
+                            style={{
+                              textAlign: "left",
+                              borderRadius: 10,
+                              border: "1px solid #efefef",
+                              padding: "10px 10px",
+                              background: isActive ? "rgba(34,151,197,0.10)" : "#fff",
+                              cursor: "pointer",
+                              opacity: unlocked ? 1 : 0.85,
+                              fontWeight: 700,
+                              color: "#111",
+                            }}
+                          >
+                            {l.title || "Lesson"}
+                            {!unlocked && (
+                              <span style={{ marginLeft: 8, color: "#f43f5e", fontWeight: 800 }}>
+                                (Unlock)
+                              </span>
+                            )}
+                          </button>
+                        );
+                      })
+                    )}
+                  </div>
                 </div>
-              </div>
-            );
-          })}
+              );
+            })
+          )}
         </div>
 
         {/* Player */}
         <div
           style={{
             background: "#fff",
+            color: "#111",
             borderRadius: 14,
             border: "1px solid #e7e7e7",
             padding: 14,
@@ -373,29 +452,40 @@ export default function CourseLearnPage() {
           }}
         >
           {!activeLesson ? (
-            <div style={{ padding: 14, opacity: 0.8 }}>
-              <div style={{ fontSize: 22, fontWeight: 900 }}>
+            <div style={{ padding: 14, opacity: 0.85 }}>
+              <div style={{ fontSize: 22, fontWeight: 700 }}>
                 No unlocked lesson selected
               </div>
-              <div style={{ marginTop: 8 }}>
+              <div style={{ marginTop: 8, fontSize: 16 }}>
                 Unlock a module (or the full course), then pick a lesson.
               </div>
             </div>
           ) : (
             <>
-              <div style={{ fontSize: 24, fontWeight: 900 }}>
+              <div style={{ fontSize: 24, fontWeight: 800 }}>
                 {activeLesson.title || "Lesson"}
               </div>
 
-              <div style={{ marginTop: 8, opacity: 0.75 }}>
+              <div style={{ marginTop: 8, opacity: 0.75, fontSize: 16 }}>
                 Type: {activeLesson.content_type || "unknown"}
               </div>
+
+              {!!activeLesson.description && (
+                <div style={{ marginTop: 10, fontSize: 16, opacity: 0.85 }}>
+                  {activeLesson.description}
+                </div>
+              )}
 
               <div style={{ marginTop: 14 }}>
                 {activeLesson.content_type === "video" ? (
                   <video
                     controls
-                    style={{ width: "100%", borderRadius: 12, border: "1px solid #eee" }}
+                    style={{
+                      width: "100%",
+                      borderRadius: 12,
+                      border: "1px solid #eee",
+                      background: "#000",
+                    }}
                     src={activeLesson.content_url || ""}
                   />
                 ) : activeLesson.content_type === "pdf" ? (
@@ -417,10 +507,12 @@ export default function CourseLearnPage() {
                       padding: 14,
                       minHeight: 220,
                       whiteSpace: "pre-wrap",
+                      fontSize: 16,
+                      color: "#111",
                     }}
                   >
                     {activeLesson.content_url
-                      ? `HTML/Text lesson (next step: render stored HTML safely).\n\nContent URL:\n${activeLesson.content_url}`
+                      ? `This lesson is not video/pdf.\n\ncontent_url:\n${activeLesson.content_url}`
                       : "No lesson content yet."}
                   </div>
                 )}

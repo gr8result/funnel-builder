@@ -110,6 +110,17 @@ export default function EmailNodeDrawer({ node, onSave, onClose, userId }) {
         </div>
 
         <div style={s.body}>
+          {/* STATS BOX */}
+          <div style={s.statsBox}>
+            <div style={s.statsTitle}>Email Statistics</div>
+            <div style={s.statsRow}><span>Processed</span><span>{Number(node?.data?.stats?.processed || 0)}</span></div>
+            <div style={s.statsRow}><span>Delivered</span><span>{Number(node?.data?.stats?.delivered || 0)}</span></div>
+            <div style={s.statsRow}><span>Opened</span><span>{Number(node?.data?.stats?.opened || 0)}</span></div>
+            <div style={s.statsRow}><span>Clicked</span><span>{Number(node?.data?.stats?.clicked || 0)}</span></div>
+            <div style={s.statsRow}><span>Bounced</span><span>{Number(node?.data?.stats?.bounced || 0)}</span></div>
+            <div style={s.statsRow}><span>Unsubscribed</span><span>{Number(node?.data?.stats?.unsubscribed || 0)}</span></div>
+          </div>
+
           <label style={s.label}>Node Label</label>
           <input
             value={label}
@@ -220,6 +231,24 @@ const s = {
     borderRadius: 8,
     color: "#fff",
     marginBottom: 14,
+  },
+  statsBox: {
+    border: "1px solid #1e293b",
+    background: "#0b1220",
+    borderRadius: 10,
+    padding: 12,
+    marginBottom: 16,
+  },
+  statsTitle: {
+    fontWeight: 800,
+    marginBottom: 8,
+  },
+  statsRow: {
+    display: "flex",
+    justifyContent: "space-between",
+    fontSize: 13,
+    opacity: 0.9,
+    marginBottom: 4,
   },
   createBtn: {
     width: "100%",

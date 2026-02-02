@@ -1,3 +1,24 @@
+
+// Style definitions
+const styles = {
+  page: { background: '#000000', minHeight: '100vh', padding: 32 },
+  container: { maxWidth: 1400, margin: '0 auto', background: 'rgba(5, 5, 5, 0.01)', borderRadius: 18, padding: 32 },
+  rangeRow: { display: 'flex', alignItems: 'center', gap: 12, margin: '24px 0 18px' },
+  rangeLabel: { fontSize: 18, fontWeight: 600, marginRight: 8 },
+  rangePill: { padding: '7px 18px', borderRadius: 999, background: 'rgba(255,255,255,0.08)', color: '#fff', fontWeight: 500, fontSize: 16, cursor: 'pointer', border: 'none', marginRight: 6 },
+  rangePillActive: { background: '#a855f7', color: '#fff' },
+  note: { fontSize: 18, opacity: 0.85, margin: '18px 0', padding: 12, background: 'rgba(255,255,255,0.04)', borderRadius: 8 },
+  metricsGrid: { display: 'flex', gap: 24, margin: '32px 0 18px' },
+  metricBox: { background: 'rgba(255,255,255,0.06)', borderRadius: 12, padding: '18px 32px', minWidth: 160, textAlign: 'center' },
+  metricTitle: { fontSize: 18, opacity: 0.85, marginBottom: 6 },
+  metricValue: { fontSize: 32, fontWeight: 700, color: '#a855f7' },
+  tableWrap: { marginTop: 32, borderRadius: 12, overflow: 'hidden', background: 'rgba(255,255,255,0.02)' },
+  tableHeadRow: { display: 'grid', gridTemplateColumns: '1.4fr 2fr 1.2fr 0.6fr 0.6fr 1fr', padding: '10px 12px', background: 'rgba(255,255,255,0.06)' },
+  th: { fontSize: 18, fontWeight: 900, opacity: 0.9 },
+  tr: { display: 'grid', gridTemplateColumns: '1.4fr 2fr 1.2fr 0.6fr 0.6fr 1fr', padding: '10px 12px', background: 'rgba(2,6,23,0.45)', borderTop: '1px solid rgba(255,255,255,0.08)' },
+  td: { fontSize: 18, opacity: 0.92, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+  tableEmpty: { padding: 12, fontSize: 18, opacity: 0.85, background: 'rgba(2,6,23,0.45)' },
+};
 // /pages/modules/email/reports/autoresponders.js
 // Full report: Autoresponders — reads from email_sends (autoresponder_id OR source_type=autoresponder)
 
@@ -54,7 +75,6 @@ export default function AutorespondersReport() {
     async function run() {
       setLoading(true);
       setLoadErr(null);
-
       try {
         const { data: auth } = await supabase.auth.getUser();
         const uid = auth?.user?.id || null;
@@ -63,25 +83,38 @@ export default function AutorespondersReport() {
 
         if (!uid) {
           setRows([]);
+
           setLoading(false);
           return;
         }
 
         const base = (q) => buildTimeFilterQuery(q.eq("user_id", uid), fromIso);
 
+        // Query 1: Get all emails
         const q1 = base(
           supabase
             .from("email_sends")
             .select("*")
             .order("created_at", { ascending: false })
-            .limit(5000)
+            .limit(10000)
         );
 
-        const { data, error } = await q1;
-        if (error) throw error;
+        const { data: data1, error: error1 } = await q1;
+        if (error1) throw error1;
 
-        const filtered = (data || []).filter((r) => {
-          if (r?.autoresponder_id) return true;
+        // Query 2: Get all valid autoresponder IDs from the queue (these are the ones we track)
+        const { data: queueData, error: qErr } = await supabase
+          .from("email_autoresponder_queue")
+          .select("autoresponder_id")
+          .eq("user_id", uid)
+          .not("autoresponder_id", "is", null);
+        
+        if (qErr) throw qErr;
+        const validAutoresponderIds = new Set((queueData || []).map((r) => r.autoresponder_id).filter(Boolean));
+
+        // Filter: show emails that either have autoresponder_id (from recent sends) OR belong to a known autoresponder
+        const filtered = (data1 || []).filter((r) => {
+          if (r?.autoresponder_id && validAutoresponderIds.has(r.autoresponder_id)) return true;
           const st = String(r?.source_type || "").toLowerCase();
           return st === "autoresponder";
         });
@@ -108,21 +141,59 @@ export default function AutorespondersReport() {
 
       <div style={styles.page}>
         <div style={styles.container}>
-          <div style={{ ...styles.banner, background: "#a855f7" }}>
-            <div>
-              <div style={styles.bannerTitle}>Autoresponders</div>
-              <div style={styles.bannerSub}>Uses <code>autoresponder_id</code> or <code>source_type=autoresponder</code> if available.</div>
+          <div style={{
+            width: "100%",
+            display: "flex",
+            justifyContent: "center",
+            marginBottom: 24,
+          }}>
+            <div style={{
+              display: "flex",
+              alignItems: "center",
+              background: "#a855f7",
+              borderRadius: 18,
+              padding: "20px 24px",
+              color: "#fff",
+              width: 1320,
+              maxWidth: '100%',
+              gap: 18,
+              border: 'none',
+              justifyContent: 'space-between'
+            }}>
+              <div style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 18
+              }}>
+                <div style={{
+                  width: 48,
+                  height: 48,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  borderRadius: 10,
+                  background: 'rgba(255,255,255,0.12)',
+                  color: '#fff',
+                  fontSize: 48,
+                }}>
+                  <span role="img" aria-label="Autoresponder" style={{ fontSize: 48 }}>⏱️</span>
+                </div>
+                <div>
+                  <div style={{ fontSize: 32, margin: 0, color: '#fff', fontWeight: 600 }}>Autoresponders</div>
+                  <div style={{ fontSize: 16, margin: "4px 0 0", opacity: 0.92, color: '#fff' }}>View and manage your timed email sequences.</div>
+                </div>
+              </div>
+              <a href="/modules/email/reports" style={{ background: "rgba(0,0,0,0.15)", color: "#fff", border: "1px solid rgba(255,255,255,0.2)", padding: "8px 16px", borderRadius: 999, cursor: "pointer", fontWeight: 500, textDecoration: "none", whiteSpace: 'nowrap' }}>← Back</a>
             </div>
-            <Link href="/modules/email/reports" style={styles.backBtn}>← Back</Link>
           </div>
 
           <div style={styles.rangeRow}>
             <div style={styles.rangeLabel}>Time period:</div>
-            <RangePill label="Today" active={range === "today"} onClick={() => setRange("today")} />
-            <RangePill label="Last 7 days" active={range === "d7"} onClick={() => setRange("d7")} />
-            <RangePill label="Last 30 days" active={range === "d30"} onClick={() => setRange("d30")} />
-            <RangePill label="Last 90 days" active={range === "d90"} onClick={() => setRange("d90")} />
-            <RangePill label="All time" active={range === "all"} onClick={() => setRange("all")} />
+            <RangePill label="Today" active={range === "today"} onClick={() => setRange("today")}/>
+            <RangePill label="Last 7 days" active={range === "d7"} onClick={() => setRange("d7")}/>
+            <RangePill label="Last 30 days" active={range === "d30"} onClick={() => setRange("d30")}/>
+            <RangePill label="Last 90 days" active={range === "d90"} onClick={() => setRange("d90")}/>
+            <RangePill label="All time" active={range === "all"} onClick={() => setRange("all")}/>
           </div>
 
           {loading ? <div style={styles.note}>Loading…</div> : null}
@@ -133,8 +204,7 @@ export default function AutorespondersReport() {
             <>
               {!hasIdentifier && rows.length === 0 ? (
                 <div style={styles.note}>
-                  No autoresponder rows found. If you want autoresponder reporting, your <code>email_sends</code> rows must include
-                  either <code>autoresponder_id</code> or <code>source_type = 'autoresponder'</code>.
+                  No autoresponder activity found for this period.
                 </div>
               ) : null}
 
@@ -200,73 +270,5 @@ function Metric({ title, value }) {
   );
 }
 
-const styles = {
-  page: {
-    minHeight: "100vh",
-    background: "radial-gradient(circle at top, rgba(15,23,42,0.9) 0%, rgba(2,6,23,1) 55%, rgba(2,6,23,1) 100%)",
-    padding: "30px 20px 40px",
-    color: "#e6eef8",
-    fontSize: 18,
-  },
-  container: { maxWidth: 1320, margin: "0 auto" },
 
-  banner: {
-    width: "100%",
-    borderRadius: 18,
-    padding: "16px 18px",
-    display: "flex",
-    justifyContent: "space-between",
-    alignItems: "center",
-    boxShadow: "0 18px 40px rgba(0,0,0,0.45)",
-    border: "1px solid rgba(255,255,255,0.10)",
-  },
-  bannerTitle: { fontSize: 48, fontWeight: 600, color: "#1f0736", lineHeight: 1.05 },
-  bannerSub: { fontSize: 18, marginTop: 3, color: "rgba(31,7,54,0.85)" },
 
-  backBtn: {
-    background: "rgba(2,6,23,0.75)",
-    color: "#e6eef8",
-    borderRadius: 999,
-    padding: "10px 16px",
-    fontSize: 18,
-    textDecoration: "none",
-    border: "1px solid rgba(255,255,255,0.18)",
-    fontWeight: 600,
-  },
-
-  rangeRow: { marginTop: 12, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" },
-  rangeLabel: { fontSize: 18, opacity: 0.9 },
-  rangePill: {
-    border: "1px solid rgba(255,255,255,0.18)",
-    background: "rgba(2,6,23,0.55)",
-    color: "#e6eef8",
-    borderRadius: 999,
-    padding: "7px 12px",
-    fontSize: 18,
-    cursor: "pointer",
-    fontWeight: 600,
-  },
-  rangePillActive: { background: "rgba(168,85,247,0.18)", border: "1px solid rgba(168,85,247,0.55)" },
-
-  note: {
-    marginTop: 10,
-    padding: "10px 12px",
-    borderRadius: 12,
-    background: "rgba(2,6,23,0.55)",
-    border: "1px solid rgba(255,255,255,0.10)",
-    fontSize: 18,
-    opacity: 0.95,
-  },
-
-  metricsGrid: { marginTop: 14, display: "grid", gridTemplateColumns: "repeat(5, minmax(0, 1fr))", gap: 10 },
-  metricBox: { padding: 12, borderRadius: 12, background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.10)" },
-  metricTitle: { fontSize: 18, opacity: 0.85, fontWeight: 700 },
-  metricValue: { fontSize: 18, fontWeight: 800, marginTop: 6 },
-
-  tableWrap: { marginTop: 14, borderRadius: 12, overflow: "hidden", border: "1px solid rgba(255,255,255,0.10)" },
-  tableHeadRow: { display: "grid", gridTemplateColumns: "1.4fr 2fr 1.2fr 0.6fr 0.6fr 1fr", padding: "10px 12px", background: "rgba(255,255,255,0.06)" },
-  th: { fontSize: 18, fontWeight: 900, opacity: 0.9 },
-  tr: { display: "grid", gridTemplateColumns: "1.4fr 2fr 1.2fr 0.6fr 0.6fr 1fr", padding: "10px 12px", background: "rgba(2,6,23,0.45)", borderTop: "1px solid rgba(255,255,255,0.08)" },
-  td: { fontSize: 18, opacity: 0.92, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
-  tableEmpty: { padding: 12, fontSize: 18, opacity: 0.85, background: "rgba(2,6,23,0.45)" },
-};

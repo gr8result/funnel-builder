@@ -179,7 +179,7 @@ export default function AutorespondersOpen() {
       <div className="banner-wrapper">
         <div className="banner">
           <div className="banner-left">
-            <span className="icon">✉️</span>
+            <span className="icon">⏱️</span>
             <div>
               <h1 className="title">Autoresponders</h1>
               <p className="subtitle">View and manage your timed email sequences.</p>

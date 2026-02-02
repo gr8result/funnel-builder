@@ -1,4 +1,4 @@
-// SAME AS BROADCASTS REPORT â€” FILTERS campaigns_id NOT NULL
+﻿// SAME AS BROADCASTS REPORT â€” FILTERS campaigns_id NOT NULL
 
 import Head from "next/head";
 import Link from "next/link";
@@ -8,6 +8,7 @@ import {
   LineChart, Line, XAxis, YAxis, Tooltip, Legend,
   ResponsiveContainer, PieChart, Pie, Cell
 } from "recharts";
+import ReportBanner from "../../../../../components/ui/ReportBanner";
 
 const RANGE_TO_DAYS = { today: 0, d7: 7, d30: 30, d90: 90, all: null };
 const PIE_COLOURS = ["#22c55e","#3b82f6","#facc15","#ef4444","#94a3b8"];
@@ -22,6 +23,7 @@ function isoDaysAgo(days) {
 
 export default function campaignsReport() {
   const [rows, setRows] = useState([]);
+  const [nameMap, setNameMap] = useState({});
   const [range, setRange] = useState("all");
   const [chartType, setChartType] = useState("line");
 
@@ -36,9 +38,9 @@ export default function campaignsReport() {
 
       let q = supabase
         .from("email_sends")
-        .select("id,email,status,open_count,click_count,unsubscribed,created_at")
+        .select("id,email,status,open_count,click_count,unsubscribed,created_at,campaign_id,last_event_at")
         .eq("user_id", userId)
-        .not("campaigns_id", "is", null)
+        .not("campaign_id", "is", null)
         .order("created_at", { ascending: true })
         .limit(5000);
 
@@ -46,6 +48,23 @@ export default function campaignsReport() {
 
       const { data } = await q;
       if (mounted) setRows(data || []);
+
+      // Fetch campaign names
+      if (data && data.length > 0) {
+        const ids = Array.from(new Set(data.map(r => r.campaign_id).filter(Boolean))).slice(0, 500);
+        if (ids.length) {
+          const { data: campaigns } = await supabase
+            .from("email_campaigns")
+            .select("id, name, title, subject")
+            .in("id", ids)
+            .limit(500);
+          if (campaigns) {
+            const m = {};
+            for (const c of campaigns) m[c.id] = c.name || c.title || c.subject || "Campaign";
+            if (mounted) setNameMap(m);
+          }
+        }
+      }
     })();
     return () => (mounted = false);
   }, [fromIso]);
@@ -86,18 +105,29 @@ export default function campaignsReport() {
     { name:"Other", value: metrics.sent-metrics.delivered-metrics.opened-metrics.clicked-metrics.unsub }
   ];
 
+  const recent = useMemo(
+    () =>
+      [...rows].sort((a, b) => new Date(b.created_at) - new Date(a.created_at)).slice(0, 250),
+    [rows]
+  );
+
   return (
     <>
-      <Head><title>campaigns report</title></Head>
+      <Head><title>Campaigns Analytics</title></Head>
       <div style={styles.page}>
-        <div style={styles.container}>
-          <div style={styles.banner}>
-            <div>
-              <div style={styles.bannerTitle}>campaigns</div>
-              <div style={styles.bannerSub}>Delivery, opens, clicks & unsubscribes</div>
+        <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 24 }}>
+          <div style={{ width: 1320, maxWidth: '100%', display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: '#14b8a6', borderRadius: 18, padding: '20px 24px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 18 }}>
+              <div style={{ width: 48, height: 48, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 48 }}>📣</div>
+              <div>
+                <div style={{ fontSize: 48, fontWeight: 500, color: '#ffffff', margin: 0 }}>Campaigns</div>
+                <div style={{ fontSize: 18, color: '#ffffff', opacity: 1, margin: '4px 0 0 0' }}>Multi-step email campaigns and sequences</div>
+              </div>
             </div>
-            <Link href="/modules/email/reports" style={styles.backBtn}>â† Back</Link>
+            <Link href="/modules/email/reports" style={{ background: '#000000', color: '#ffffff', padding: '10px 16px', borderRadius: 999, textDecoration: 'none', fontWeight: 500, border: 'none', fontSize: 18 }}>← Back</Link>
           </div>
+        </div>
+        <div style={styles.container}>
 
           <div style={styles.rangeRow}>
             {["today","d7","d30","d90","all"].map(r=>(
@@ -143,6 +173,40 @@ export default function campaignsReport() {
               </ResponsiveContainer>
             )}
           </div>
+
+          <div style={styles.tableWrap}>
+            <div style={styles.tableHeadRow}>
+              <div style={styles.th}>When</div>
+              <div style={styles.th}>Email</div>
+              <div style={styles.th}>Campaign</div>
+              <div style={styles.th}>Delivered</div>
+              <div style={styles.th}>Open</div>
+              <div style={styles.th}>Click</div>
+              <div style={styles.th}>Unsub</div>
+              <div style={styles.th}>Status</div>
+            </div>
+            {recent.length === 0 ? (
+              <div style={styles.tableEmpty}>No campaign rows found for this period.</div>
+            ) : (
+              recent.map((r) => {
+                const when = r.last_event_at || r.created_at;
+                const deliveredYes = ["delivered", "opened", "clicked"].includes(String(r.status || "").toLowerCase());
+                const cName = nameMap[r.campaign_id] || "Campaign";
+                return (
+                  <div key={r.id} style={styles.tr}>
+                    <div style={styles.td}>{when ? new Date(when).toLocaleString() : "—"}</div>
+                    <div style={styles.td}>{r.email || "—"}</div>
+                    <div style={styles.td} title={cName}>{cName}</div>
+                    <div style={styles.td}>{deliveredYes ? "✓" : "—"}</div>
+                    <div style={styles.td}>{Number(r.open_count || 0) > 0 ? "✓" : "—"}</div>
+                    <div style={styles.td}>{Number(r.click_count || 0) > 0 ? "✓" : "—"}</div>
+                    <div style={styles.td}>{r.unsubscribed || String(r.status || "").toLowerCase() === "unsubscribe" ? "Yes" : "—"}</div>
+                    <div style={styles.td}>{String(r.status || "—")}</div>
+                  </div>
+                );
+              })
+            )}
+          </div>
         </div>
       </div>
     </>
@@ -161,18 +225,20 @@ function Metric({label,value}) {
 const styles = {
   page:{minHeight:"100vh",background:"radial-gradient(circle at top, rgba(15,23,42,0.9), rgba(2,6,23,1))",padding:20,color:"#e6eef8",fontSize:16},
   container:{maxWidth:1320,margin:"0 auto"},
-  banner:{background:"#22c55e",borderRadius:18,padding:16,display:"flex",justifyContent:"space-between",alignItems:"center"},
-  bannerTitle:{fontSize:32,fontWeight:600,color:"#052b1b"},
-  bannerSub:{fontSize:16,color:"#052b1b",opacity:0.9},
-  backBtn:{background:"#052b1b",color:"#fff",padding:"8px 14px",borderRadius:999,textDecoration:"none",fontSize:16},
-  rangeRow:{marginTop:12,display:"flex",gap:8,alignItems:"center"},
-  rangeBtn:{fontSize:16,padding:"6px 12px",borderRadius:999,border:"1px solid rgba(255,255,255,0.2)",background:"rgba(2,6,23,0.6)",color:"#fff"},
-  rangeActive:{background:"rgba(34,197,94,0.25)",border:"1px solid rgba(34,197,94,0.7)"},
-  toggleBtn:{fontSize:16,padding:"6px 14px",borderRadius:999,background:"rgba(255,255,255,0.1)",border:"1px solid rgba(255,255,255,0.2)",color:"#fff"},
+  rangeRow:{marginTop:12,display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"},
+  rangeBtn:{fontSize:16,padding:"6px 12px",borderRadius:999,border:"1px solid rgba(255,255,255,0.18)",background:"rgba(2,6,23,0.6)",color:"#fff",cursor:"pointer",fontWeight:600},
+  rangeActive:{background:"rgba(20,184,166,0.20)",border:"1px solid rgba(20,184,166,0.55)"},
+  toggleBtn:{fontSize:16,padding:"10px 16px",borderRadius:999,background:"rgba(2,6,23,0.75)",border:"1px solid rgba(255,255,255,0.18)",color:"#e6eef8",cursor:"pointer",fontWeight:700,whiteSpace:"nowrap"},
   metricsRow:{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:10,marginTop:14},
-  metricBox:{padding:12,borderRadius:12,background:"rgba(255,255,255,0.06)",border:"1px solid rgba(255,255,255,0.1)"},
-  metricLabel:{fontSize:16,fontWeight:500,opacity:0.85},
-  metricValue:{fontSize:20,fontWeight:600},
-  chartWrap:{marginTop:16,padding:16,borderRadius:14,background:"rgba(2,6,23,0.55)",border:"1px solid rgba(255,255,255,0.1)"},
-  chartTitle:{fontSize:18,fontWeight:600,marginBottom:8}
+  metricBox:{padding:12,borderRadius:12,background:"rgba(255,255,255,0.06)",border:"1px solid rgba(255,255,255,0.10)"},
+  metricLabel:{fontSize:16,opacity:0.85,fontWeight:700},
+  metricValue:{fontSize:16,fontWeight:700,marginTop:6},
+  chartWrap:{marginTop:14,padding:14,borderRadius:14,background:"rgba(2,6,23,0.55)",border:"1px solid rgba(255,255,255,0.10)"},
+  chartTitle:{fontSize:18,fontWeight:600,marginBottom:8},
+  tableWrap:{marginTop:14,borderRadius:12,overflow:"hidden",border:"1px solid rgba(255,255,255,0.10)"},
+  tableHeadRow:{display:"grid",gridTemplateColumns:"1.4fr 2fr 2fr .8fr .6fr .6fr .6fr 1fr",padding:"10px 12px",background:"rgba(255,255,255,0.06)"},
+  th:{fontSize:16,fontWeight:700,opacity:0.9},
+  tr:{display:"grid",gridTemplateColumns:"1.4fr 2fr 2fr .8fr .6fr .6fr .6fr 1fr",padding:"10px 12px",background:"rgba(2,6,23,0.45)",borderTop:"1px solid rgba(255,255,255,0.08)"},
+  td:{fontSize:16,opacity:0.92,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"},
+  tableEmpty:{padding:12,fontSize:16,opacity:0.85,background:"rgba(2,6,23,0.45)"}
 };

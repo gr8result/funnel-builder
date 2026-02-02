@@ -1,0 +1,10 @@
+# .dockerignore - reduce Docker build context size
+node_modules
+.git
+.vscode
+.env*
+dist
+build
+*.log
+tmp
+.DS_Store

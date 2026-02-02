@@ -244,7 +244,62 @@ export default async function handler(req, res) {
             await supabaseAdmin.from("email_sends").update(updates).eq("id", matchedSend.id);
             processedCount += 1;
           }
-        } else {
+        }
+
+        // ALSO update automation_email_queue for automation tracking
+        try {
+          const queueId =
+            customArgs?.automation_queue_id ||
+            customArgs?.automationQueueId ||
+            customArgs?.gr8_automation_queue_id ||
+            null;
+
+          let queueRow = null;
+          if (queueId) {
+            const { data: byQ } = await supabaseAdmin
+              .from("automation_email_queue")
+              .select("id,open_count,click_count,status,sendgrid_message_id")
+              .eq("id", String(queueId))
+              .maybeSingle();
+            if (byQ) queueRow = byQ;
+          } else if (sgMsgId) {
+            const { data: bySg } = await supabaseAdmin
+              .from("automation_email_queue")
+              .select("id,open_count,click_count,status,sendgrid_message_id")
+              .eq("sendgrid_message_id", sgMsgId)
+              .order("created_at", { ascending: false })
+              .limit(1)
+              .maybeSingle();
+            if (bySg) queueRow = bySg;
+          }
+
+          if (queueRow?.id) {
+            const qUpdates = {};
+            const nowIso = new Date().toISOString();
+
+            if (evType === "open") {
+              qUpdates.open_count = Number(queueRow.open_count || 0) + 1;
+            } else if (evType === "click") {
+              qUpdates.click_count = Number(queueRow.click_count || 0) + 1;
+            } else if (evType === "delivered" || evType === "processed") {
+              qUpdates.status = "sent";
+            } else if (evType === "bounce" || evType === "dropped") {
+              qUpdates.status = "bounced";
+            } else if (evType === "unsubscribe" || evType === "group_unsubscribe") {
+              qUpdates.status = "unsubscribed";
+            }
+
+            if (sgMsgId) qUpdates.sendgrid_message_id = sgMsgId;
+            if (Object.keys(qUpdates).length) {
+              qUpdates.updated_at = nowIso;
+              await supabaseAdmin.from("automation_email_queue").update(qUpdates).eq("id", queueRow.id);
+            }
+          }
+        } catch (qErr) {
+          // ignore queue update errors
+        }
+
+        if (!matchedSend) {
           // No match found; audit row exists so you can reconcile manually.
           // Optionally implement matching by broadcast id or other custom args here.
         }

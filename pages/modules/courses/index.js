@@ -72,7 +72,7 @@ export default function CoursesIndex() {
         {/* Banner (kept same style as your current module pattern) */}
         <div style={page.banner}>
           <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
-            <div style={page.iconWrap}>{ICONS.courses({ size: 32, color: "#fff" })}</div>
+            <div style={page.iconWrap}>{ICONS.courses({ size: 48, color: "#fff" })}</div>
             <div>
               <h1 style={page.title}>Online Courses</h1>
               <p style={page.subtitle}>
@@ -129,7 +129,7 @@ export default function CoursesIndex() {
               </Link>
             </div>
 
-            <div style={{ marginTop: 12, opacity: 0.75, fontSize: 13 }}>
+            <div style={{ marginTop: 12, opacity: 0.75, fontSize: 16 }}>
               Debug marker: <b>COURSES-INDEX-LIVE-v1</b>
             </div>
           </div>
@@ -182,17 +182,6 @@ export default function CoursesIndex() {
             )}
           </div>
         </div>
-
-        {/* Keep original Coming soon box ONLY if nothing exists */}
-        {!loading && courses.length === 0 && (
-          <div style={page.comingSoonBox}>
-            <h2 style={{ margin: 0, fontSize: 22, fontWeight: 700 }}>Coming soon</h2>
-            <p style={{ marginTop: 6, opacity: 0.9 }}>
-              This module is currently in development. It will include a full curriculum builder, lesson creator,
-              student portal, progress tracking, payments & certificates.
-            </p>
-          </div>
-        )}
       </div>
     </div>
   );
@@ -217,7 +206,7 @@ const page = {
     borderRadius: 12,
     padding: "18px 22px",
     marginBottom: 26,
-    fontWeight: 700,
+    fontWeight: 600,
     gap: 14,
   },
   iconWrap: {
@@ -228,8 +217,8 @@ const page = {
     alignItems: "center",
     justifyContent: "center",
   },
-  title: { fontSize: 26, margin: 0 },
-  subtitle: { fontSize: 15, opacity: 0.9, margin: 0, marginTop: 4 },
+  title: { fontSize: 48, fontWeight: 600, margin: 0 },
+  subtitle: { fontSize: 18, fontWeight: 600,opacity: 0.9, margin: 0, marginTop: 4 },
 
   backBtn: {
     background: "#1e293b",
@@ -237,7 +226,7 @@ const page = {
     border: "1px solid #334155",
     borderRadius: 8,
     padding: "10px 18px",
-    fontSize: 14,
+    fontSize: 18,
     fontWeight: 600,
     cursor: "pointer",
   },
@@ -247,8 +236,8 @@ const page = {
     border: "1px solid rgba(255,255,255,0.28)",
     borderRadius: 8,
     padding: "10px 18px",
-    fontSize: 14,
-    fontWeight: 700,
+    fontSize: 18,
+    fontWeight: 600,
     cursor: "pointer",
     whiteSpace: "nowrap",
   },
@@ -266,7 +255,7 @@ const page = {
     borderRadius: 12,
     padding: 14,
   },
-  panelTitle: { fontSize: 16, fontWeight: 800, marginBottom: 10 },
+  panelTitle: { fontSize: 28, fontWeight: 600, marginBottom: 10 },
 
   searchInput: {
     width: "100%",
@@ -279,7 +268,7 @@ const page = {
     color: "#fff",
   },
 
-  metaText: { marginTop: 10, opacity: 0.85, fontSize: 14 },
+  metaText: { marginTop: 10, opacity: 0.85, fontSize: 16 },
   hr: { borderTop: "1px solid #1f2937", margin: "14px 0" },
 
   actionBtn: {
@@ -289,8 +278,8 @@ const page = {
     border: "1px solid rgba(255,255,255,0.12)",
     borderRadius: 10,
     padding: "12px 12px",
-    fontSize: 14,
-    fontWeight: 800,
+    fontSize: 16,
+    fontWeight: 600,
     cursor: "pointer",
   },
   actionBtnAlt: {
@@ -300,8 +289,8 @@ const page = {
     border: "1px solid #334155",
     borderRadius: 10,
     padding: "12px 12px",
-    fontSize: 14,
-    fontWeight: 800,
+    fontSize: 16,
+    fontWeight: 600,
     cursor: "pointer",
   },
 
@@ -331,8 +320,8 @@ const page = {
     color: "#fff",
     borderRadius: 10,
     padding: "10px 12px",
-    fontSize: 14,
-    fontWeight: 800,
+    fontSize: 16,
+    fontWeight: 600,
     cursor: "pointer",
     whiteSpace: "nowrap",
   },
@@ -342,8 +331,8 @@ const page = {
     color: "#fff",
     borderRadius: 10,
     padding: "10px 12px",
-    fontSize: 14,
-    fontWeight: 800,
+    fontSize: 16,
+    fontWeight: 600,
     cursor: "pointer",
     whiteSpace: "nowrap",
   },

@@ -1,18 +1,11 @@
 // /pages/api/automation/members/add-list.js
-// FULL REPLACEMENT — combines best of both approaches
+// FULL REPLACEMENT — same import logic, but FIXES tick URL so it always hits correct host/port
 //
-// ✅ Imports automation members from leads.list_id (authoritative source)
-// ✅ Multi-tenant safe (user must own the flow + leads)
-// ✅ Correct ownership check: maps auth uid -> accounts.id and compares to flow.user_id
-// ✅ Idempotent: won't duplicate members, handles user_id column gracefully
-//
-// Expects JSON body:
-//  { "flow_id": "<uuid>", "list_id": "<uuid>" }
-//
-// Requires env:
-//  NEXT_PUBLIC_SUPABASE_URL (or SUPABASE_URL)
-//  SUPABASE_SERVICE_ROLE_KEY (or SUPABASE_SERVICE_ROLE / SUPABASE_SERVICE_KEY / SUPABASE_SERVICE)
-//  NEXT_PUBLIC_SUPABASE_ANON_KEY
+// ✅ Imports members from leads.list_id
+// ✅ Multi-tenant safe
+// ✅ Idempotent (no dupes)
+// ✅ After import, calls /api/automation/engine/tick on SAME host/port that received this request
+// ✅ Uses cron secret header if present (optional)
 
 import { createClient } from "@supabase/supabase-js";
 
@@ -40,6 +33,12 @@ function getBearer(req) {
   return (m?.[1] || "").trim();
 }
 
+function getBaseUrlFromReq(req) {
+  const proto = String(req.headers["x-forwarded-proto"] || "http");
+  const host = String(req.headers["x-forwarded-host"] || req.headers.host || "localhost:3000");
+  return `${proto}://${host}`;
+}
+
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ ok: false, error: "POST only" });
 
@@ -62,7 +61,6 @@ export default async function handler(req, res) {
     auth: { persistSession: false, autoRefreshToken: false },
   });
 
-  // Authenticated client to read the current user
   const supabaseUser = createClient(SUPABASE_URL, ANON_KEY, {
     auth: { persistSession: false, autoRefreshToken: false },
     global: { headers: { Authorization: `Bearer ${token}` } },
@@ -79,7 +77,6 @@ export default async function handler(req, res) {
 
   const flow_id = String(req.body?.flow_id || "").trim();
   const list_id = String(req.body?.list_id || "").trim();
-
   if (!flow_id || !list_id) {
     return res.status(400).json({
       ok: false,
@@ -89,7 +86,7 @@ export default async function handler(req, res) {
   }
 
   try {
-    // 1) Resolve account_id for this auth user (accounts.id)
+    // Resolve account_id for auth user
     const { data: acct, error: acctErr } = await supabaseAdmin
       .from("accounts")
       .select("id,user_id")
@@ -99,7 +96,7 @@ export default async function handler(req, res) {
     if (acctErr) throw acctErr;
     const account_id = acct?.id || null;
 
-    // 2) Load flow owner (flow.user_id = accounts.id)
+    // Load flow owner
     const { data: flow, error: flowErr } = await supabaseAdmin
       .from("automation_flows")
       .select("id,user_id,name,is_standard")
@@ -109,11 +106,9 @@ export default async function handler(req, res) {
     if (flowErr) throw flowErr;
     if (!flow?.id) return res.status(404).json({ ok: false, error: "Flow not found" });
 
-    // Allow standard flows, otherwise require ownership match
     const owned =
       flow.is_standard === true ||
       (account_id && String(flow.user_id) === String(account_id)) ||
-      // legacy tolerance (if any old flows store auth uid)
       String(flow.user_id) === String(user.id);
 
     if (!owned) {
@@ -124,10 +119,10 @@ export default async function handler(req, res) {
       });
     }
 
-    // 3) Pull leads from leads.list_id (the authoritative source)
+    // Pull leads from leads.list_id
     const { data: leads, error: leadsErr } = await supabaseAdmin
       .from("leads")
-      .select("id,user_id,email,name,list_id")
+      .select("id,user_id,list_id")
       .eq("user_id", user.id)
       .eq("list_id", list_id)
       .limit(5000);
@@ -145,17 +140,14 @@ export default async function handler(req, res) {
       });
     }
 
-    // 4) Insert into automation_flow_members with graceful user_id handling
     let imported = 0;
     let skipped = 0;
-
     const now = new Date().toISOString();
 
     for (const leadId of leadIds) {
-      // Check if already exists
       const { data: existing, error: exErr } = await supabaseAdmin
         .from("automation_flow_members")
-        .select("id")
+        .select("id,status")
         .eq("flow_id", flow_id)
         .eq("lead_id", leadId)
         .maybeSingle();
@@ -163,16 +155,23 @@ export default async function handler(req, res) {
       if (exErr) throw exErr;
 
       if (existing?.id) {
-        skipped++;
+        // Reactivate if status is not already active
+        if (existing.status !== "active") {
+          const { error: upErr } = await supabaseAdmin
+            .from("automation_flow_members")
+            .update({ status: "active", updated_at: now })
+            .eq("id", existing.id);
+          if (upErr) throw upErr;
+        }
+        // Count as imported even if already existed (reactivation counts)
+        imported++;
         continue;
       }
 
-      // Try insert with user_id first (preferred)
-      // Use the auth user_id for consistency with other endpoints
       const { error: insErr } = await supabaseAdmin.from("automation_flow_members").insert({
         flow_id,
         lead_id: leadId,
-        user_id: user.id, // Use auth user_id
+        user_id: user.id,
         status: "active",
         source: "list_import",
         created_at: now,
@@ -180,7 +179,7 @@ export default async function handler(req, res) {
       });
 
       if (insErr) {
-        // If user_id column doesn't exist or causes issues, retry without it
+        // Retry without user_id if column doesn’t exist
         if (String(insErr.message || "").toLowerCase().includes("user_id")) {
           const { error: ins2Err } = await supabaseAdmin.from("automation_flow_members").insert({
             flow_id,
@@ -199,25 +198,28 @@ export default async function handler(req, res) {
       imported++;
     }
 
-    // 5) Automatically trigger the automation engine to start processing these new members
+    // Trigger tick on SAME host/port (fixes localhost:3000 vs 3002 problem)
     if (imported > 0) {
-      try {
-        const tickUrl = `${process.env.NEXTAUTH_URL || "http://localhost:3000"}/api/automation/engine/tick`;
-        const cron_secret = process.env.AUTOMATION_CRON_SECRET || process.env.AUTOMATION_CRON_KEY || process.env.CRON_SECRET || "";
-        
-        // Fire and forget - don't block the response
-        fetch(tickUrl, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "x-cron-key": cron_secret,
-          },
-          body: JSON.stringify({ flow_id, arm: "yes", max: 100 }),
-        }).catch((err) => console.error("Auto-tick failed:", err));
-      } catch (tickErr) {
-        console.error("Failed to trigger automation:", tickErr);
-        // Don't fail the response - import was successful
-      }
+      const cron_secret =
+        process.env.AUTOMATION_CRON_SECRET ||
+        process.env.AUTOMATION_CRON_KEY ||
+        process.env.CRON_SECRET ||
+        "";
+
+      const baseUrl = getBaseUrlFromReq(req);
+      const tickUrl = `${baseUrl}/api/automation/engine/tick`;
+
+      // fire-and-forget
+      fetch(tickUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(cron_secret ? { "x-cron-key": String(cron_secret) } : {}),
+          // we also pass user bearer so it works even if cron secret is missing
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ flow_id, arm: "yes", max: 100 }),
+      }).catch(() => {});
     }
 
     return res.json({
@@ -226,9 +228,7 @@ export default async function handler(req, res) {
       list_id,
       inserted: imported,
       imported,
-      reactivated: imported, // Show number of newly activated/imported members
       existing: skipped,
-      total: leadIds.length,
       total_in_list: leadIds.length,
     });
   } catch (e) {

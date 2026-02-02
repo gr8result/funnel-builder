@@ -1,5 +1,5 @@
 // /pages/store/dashboard.js
-// TASKS + PLATFORM DASHBOARD â€“ imports tasks from tasks + crm_tasks
+// TASKS + PLATFORM DASHBOARD -imports tasks from tasks + crm_tasks
 // with subscriber/lead avatars, coloured module cards matching the side nav.
 
 import { useEffect, useState } from "react";
@@ -36,6 +36,8 @@ const CommunitiesIcon = ({ size = 22, color = "#000" }) => (
     <line x1="15" y1="8.6" x2="13.4" y2="14.4" />
   </svg>
 );
+
+
 
 // Card colour + icon map (matches SideNav colours)
 const MODULE_META = {
@@ -119,14 +121,14 @@ const DEFAULT_MODULE_CARDS = [
   },
   {
     id: "affiliate-vendors",
-    title: "Vendors â€“ Affiliate Products",
-    subtitle: "Vendors whose products you list as an affiliate",
+    title: "Vendor's Sales Revenue",
+    subtitle: "Vendor's products you sell using affiliates",
     enabled: true,
   },
   {
     id: "affiliate-revenue",
-    title: "Affiliate Sales â€“ Other Peopleâ€™s Products",
-    subtitle: "Revenue earned selling other peopleâ€™s products",
+    title: "Affiliate Sales - Other People's Products",
+    subtitle: "Revenue earned selling other people's products",
     enabled: true,
   },
   {
@@ -407,7 +409,7 @@ function parseNotes(raw) {
     body,
   };
 
-  meta.split("â€¢").forEach((chunk) => {
+  meta.split("•").forEach((chunk) => {
     const [labelRaw, valueRaw] = chunk.split(":");
     if (!labelRaw || !valueRaw) return;
     const label = labelRaw.trim().toLowerCase();
@@ -489,16 +491,16 @@ export default function StoreDashboard() {
 
   const [showModuleConfig, setShowModuleConfig] = useState(false);
 
-  // ðŸ”‘ Card style â€“ default glass, then read LS on first client render
+  // ðŸ”‘ Card style -default glass, then read LS on first client render
   const [cardStyle, setCardStyle] = useState("glass");
 
   // client edit modal
   const [isLeadModalOpen, setIsLeadModalOpen] = useState(false);
   const [selectedLead, setSelectedLead] = useState(null);
-  const [stages] = useState([]); // weâ€™re not using pipeline stages here, keep empty
+  const [stages] = useState([]); // we're not using pipeline stages here, keep empty
   const [userId, setUserId] = useState(null);
 
-  // selected tasks (checkbox) â€“ dashboard version
+  // selected tasks (checkbox) -dashboard version
   const [selectedTaskIds, setSelectedTaskIds] = useState([]);
 
   const handleOpenLeadDetails = (lead) => {
@@ -522,7 +524,7 @@ export default function StoreDashboard() {
     }
   };
 
-  // âœ… Read saved card style from localStorage (glass / solid)
+  // ✅ Read saved card style from localStorage (glass / solid)
   useEffect(() => {
     if (typeof window === "undefined") return;
     try {
@@ -548,7 +550,7 @@ export default function StoreDashboard() {
     }
   }, [moduleCards]);
 
-  // MAIN LOAD â€“ stats + tasks + subscribers + email stats
+  // MAIN LOAD -stats + tasks + subscribers + email stats
   useEffect(() => {
     (async () => {
       try {
@@ -646,7 +648,7 @@ export default function StoreDashboard() {
 
         setAllTasks(combinedTasks);
 
-        // Subscriber stats (for mini cards â€“ total + last 7 days)
+        // Subscriber stats (for mini cards -total + last 7 days)
         let subscribersTotal = 0;
         let subscribersLast7 = 0;
         try {
@@ -714,7 +716,7 @@ export default function StoreDashboard() {
           setSubscriberMap({});
         }
 
-        // stats â€“ revenue + orders
+        // stats -revenue + orders
         const totalRevenueCents = safeOrders.reduce(
           (sum, o) => sum + (o.amount_cents || 0),
           0
@@ -859,7 +861,7 @@ export default function StoreDashboard() {
             broadcasts7d + campaigns7d + automations7d + autoresponders7d,
         });
 
-        // visible tasks list â€“ default to "overdue"
+        // visible tasks list -default to "overdue"
         setTasks(applyTaskFilter(combinedTasks, "overdue", taskDate));
         setSelectedTaskIds([]);
 
@@ -1145,7 +1147,7 @@ export default function StoreDashboard() {
                 fontSize: 32,
               }}
             >
-              ðŸ“Š
+              📊
             </span>
             <div>
               <div>Today&apos;s Important Tasks</div>
@@ -1210,7 +1212,7 @@ export default function StoreDashboard() {
                 boxShadow: "0 6px 16px rgba(0,0,0,0.55)",
               }}
             >
-              âš™ï¸ Customise dashboard
+              ⚙️ Customise dashboard
             </button>
             <Link
               href="/dashboard"
@@ -1227,7 +1229,7 @@ export default function StoreDashboard() {
                 fontSize: 16,
               }}
             >
-              â† Back
+              ← Back
             </Link>
           </div>
         </div>
@@ -1341,7 +1343,7 @@ export default function StoreDashboard() {
                         "0 0 0 2px rgba(248,113,113,0.7),0 8px 18px rgba(0,0,0,0.7)",
                     }}
                   >
-                    ðŸ“ž
+                     📞
                   </span>
                   Calls &amp; Voicemails
                 </div>
@@ -1638,7 +1640,7 @@ export default function StoreDashboard() {
                     whiteSpace: "nowrap",
                   }}
                 >
-                  ðŸ—‘ Delete Selected ({selectedTaskIds.length})
+                   🗑 Delete Selected ({selectedTaskIds.length})
                 </button>
               </div>
 
@@ -1693,7 +1695,7 @@ export default function StoreDashboard() {
               </div>
             </div>
 
-            {/* TASKS LIST â€“ CRM-style cards */}
+            {/* TASKS LIST -CRM-style cards */}
             <div
               style={{
                 borderRadius: 12,
@@ -1790,7 +1792,7 @@ export default function StoreDashboard() {
                   fontWeight: 600,
                 }}
               >
-                Platform Modules â€“ Activity Overview
+                Platform Modules -Activity Overview
               </div>
               <div
                 style={{
@@ -1847,12 +1849,12 @@ export default function StoreDashboard() {
                         fontWeight: 500,
                       }}
                     >
-                      âœ… {c.title}
+                      ✅ {c.title}
                     </button>
                   ))}
                   {enabledCards.length === 0 && (
                     <span style={{ color: "#f97316" }}>
-                      No modules enabled â€“ turn some back on below.
+                      No modules enabled -turn some back on below.
                     </span>
                   )}
                 </div>
@@ -1894,7 +1896,7 @@ export default function StoreDashboard() {
                           fontWeight: 500,
                         }}
                       >
-                        âž• {c.title}
+                         ➕ {c.title}
                       </button>
                     ))
                   )}
@@ -2184,7 +2186,7 @@ export default function StoreDashboard() {
           setSelectedLead(null);
         }}
         onNotesUpdated={() => {
-          // optional â€“ keep this dashboard's tasks/leads in sync if needed
+          // optional -keep this dashboard's tasks/leads in sync if needed
         }}
       />
 
@@ -2209,7 +2211,7 @@ export default function StoreDashboard() {
   );
 }
 
-/* TASK ROW â€“ CRM-style for dashboard */
+/* TASK ROW -CRM-style for dashboard */
 
 function TaskRow({
   task,
@@ -2304,7 +2306,7 @@ function TaskRow({
           flex: 1,
         }}
       >
-        {/* checkbox â€“ replaces old 00:00 column */}
+        {/* checkbox -replaces old 00:00 column */}
         <input
           type="checkbox"
           checked={!!selected}
@@ -2419,7 +2421,7 @@ function TaskRow({
         </div>
       </div>
 
-      {/* right side â€“ due + status */}
+      {/* right side -due + status */}
       <div
         style={{
           display: "flex",
@@ -2468,7 +2470,7 @@ function TaskRow({
   );
 }
 
-/* MODULE CARDS â€“ supports glass + solid */
+/* MODULE CARDS -supports glass + solid */
 
 function ModuleCard({
   card,
@@ -2570,7 +2572,7 @@ function ModuleCard({
               paddingLeft: 6,
             }}
           >
-            âœ•
+             ✖
           </button>
         </div>
 
@@ -2657,7 +2659,7 @@ function ModuleCard({
                 fontWeight: 400,
               }}
             >
-              Placeholder stats â€“ connected shortly to real data.
+              Placeholder stats -connected shortly to real data.
             </div>
           </>
         )}
@@ -2728,7 +2730,7 @@ function ModuleCard({
         <button
           type="button"
           onClick={(e) => {
-            e.stopPropagation(); // donâ€™t trigger navigation when hiding
+            e.stopPropagation(); // don't trigger navigation when hiding
             onHide(card.id);
           }}
           style={{
@@ -2740,7 +2742,7 @@ function ModuleCard({
           }}
           title="Hide this module"
         >
-          âœ•
+           ✖
         </button>
       </div>
 
@@ -2818,7 +2820,7 @@ function ModuleCard({
               fontWeight: 400,
             }}
           >
-            Placeholder stats for now â€“ will be wired to live data from this
+            Placeholder stats for now -will be wired to live data from this
             module (signups, revenue, posts, etc.).
           </div>
         </>

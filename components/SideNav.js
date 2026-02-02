@@ -70,8 +70,8 @@ const MODULE_ITEMS = [
   {
     href: "/modules/email/crm",
     label: "CRM",
-    icon: ICONS.leads, // same icon as dashboard CRM card
-    color: "u22", // new colour band – light blue
+    icon: ICONS.email, // same envelope icon as Email marketing
+    color: "u22", // light blue
   },
   {
     href: "/modules/website-builder",
